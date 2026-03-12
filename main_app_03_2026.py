@@ -225,17 +225,27 @@ ECONOMIC_INDICATORS = {
 # ─────────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def fetch_ohlc(ticker: str, period: str, interval: str) -> pd.DataFrame:
-    """Fetch OHLCV data from Yahoo Finance."""
-    try:
-        t = yf.Ticker(ticker)
-        df = t.history(period=period, interval=interval)
-        if df.empty:
-            return pd.DataFrame()
-        df.index = pd.to_datetime(df.index)
-        df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
-        return df
-    except Exception as e:
-        return pd.DataFrame()
+    """Fetch OHLCV data from Yahoo Finance with automatic fallback."""
+    fallback_chain = [
+        (period, interval),
+        ("5d",  "5m"),
+        ("1mo", "15m"),
+        ("3mo", "1h"),
+        ("6mo", "1d"),
+    ]
+    for p, i in fallback_chain:
+        try:
+            t  = yf.Ticker(ticker)
+            df = t.history(period=p, interval=i)
+            if df.empty or len(df) < 10:
+                continue
+            df.index = pd.to_datetime(df.index)
+            df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+            if len(df) >= 10:
+                return df
+        except Exception:
+            continue
+    return pd.DataFrame()
 
 
 @st.cache_data(ttl=600)
@@ -866,24 +876,47 @@ def _p(text: str) -> str:
 # ─────────────────────────────────────────────────────────────
 def compute_scalp_advice(df: pd.DataFrame, pred: dict, market_name: str, timeframe: str, trade_size: float = 100.0) -> dict:
     """Compute entry/exit levels and trade advice for scalpers."""
-    if df.empty or len(df) < 20:
+    if df.empty:
         return {}
 
-    df = compute_indicators(df)
-    last = df.iloc[-1]
+    # Work with whatever rows we have, minimum 5
+    if len(df) < 5:
+        return {}
 
-    current_price = last["Close"]
-    atr = last.get("ATR", current_price * 0.001)
-    if np.isnan(atr) or atr == 0:
-        atr = current_price * 0.001
+    # If fewer than 20 rows, build a synthetic price-based fallback
+    if len(df) < 20:
+        current_price = df["Close"].iloc[-1]
+        atr = (df["High"] - df["Low"]).mean()
+        if np.isnan(atr) or atr == 0:
+            atr = current_price * 0.001
+        direction  = pred.get("direction", "NEUTRE")
+        bull_prob  = pred.get("bull_prob", 50)
+        bear_prob  = pred.get("bear_prob", 50)
+        confidence = pred.get("confidence", 0)
+        rsi = 50.0
+        bb_upper = current_price * 1.005
+        bb_lower = current_price * 0.995
+        ema9  = current_price
+        ema21 = current_price
+    else:
+        df = compute_indicators(df)
+        last = df.iloc[-1]
 
-    direction  = pred.get("direction", "NEUTRE")
-    bull_prob  = pred.get("bull_prob", 50)
-    bear_prob  = pred.get("bear_prob", 50)
-    confidence = pred.get("confidence", 0)
+        current_price = last["Close"]
+        atr = last.get("ATR", current_price * 0.001)
+        if np.isnan(atr) or atr == 0:
+            atr = current_price * 0.001
+
+        direction  = pred.get("direction", "NEUTRE")
+        bull_prob  = pred.get("bull_prob", 50)
+        bear_prob  = pred.get("bear_prob", 50)
+        confidence = pred.get("confidence", 0)
+
+        # ATR multipliers by timeframe
 
     # ATR multipliers by timeframe
     tf_mult = {"5 min": 0.8, "15 min": 1.2, "60 min": 2.0, "240 min": 3.5}
+    mult = tf_mult.get(timeframe, 1.0)
     mult = tf_mult.get(timeframe, 1.0)
 
     bb_upper = last.get("BB_upper", current_price * 1.005)
@@ -1027,177 +1060,385 @@ def compute_scalp_advice(df: pd.DataFrame, pred: dict, market_name: str, timefra
 # ─────────────────────────────────────────────────────────────
 # PDF REPORT  (fixed: all text sanitized via _p())
 # ─────────────────────────────────────────────────────────────
-def generate_pdf_report(market_data: dict, predictions_all: dict, fund_score: dict) -> bytes:
-    """Generate a PDF report — all text sanitized for latin-1."""
+def generate_pdf_report(
+    market_data: dict,
+    predictions_all: dict,
+    fund_score: dict,
+    news_articles: list = None,
+    scalp_advices: dict = None,
+) -> bytes:
+    """
+    Compact 2-3 page PDF:
+      Page 1 — Resume executif + Conseils scalping tous horizons
+      Page 2 — Indicateurs techniques par marche
+      Page 3 — Actualites & sentiment news
+    All text sanitized via _p() for latin-1 compatibility.
+    """
+    if news_articles is None:
+        news_articles = []
+    if scalp_advices is None:
+        scalp_advices = {}
+
     pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_auto_page_break(auto=True, margin=12)
+
+    # ── helpers ──────────────────────────────────────────
+    def title_bar(text, r=30, g=100, b=180):
+        pdf.set_fill_color(r, g, b)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.cell(0, 7, _p(text), ln=True, fill=True)
+        pdf.set_text_color(30, 30, 30)
+        pdf.ln(1)
+
+    def section_bar(text):
+        pdf.set_fill_color(220, 230, 245)
+        pdf.set_text_color(20, 60, 130)
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.cell(0, 6, _p(f"  {text}"), ln=True, fill=True)
+        pdf.set_text_color(30, 30, 30)
+
+    def row(label, value, r=30, g=30, b=30, bold_val=False):
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_text_color(80, 80, 80)
+        pdf.cell(70, 5, _p(label), border=0)
+        pdf.set_font("Helvetica", "B" if bold_val else "", 8)
+        pdf.set_text_color(r, g, b)
+        pdf.cell(0, 5, _p(str(value)), ln=True)
+        pdf.set_text_color(30, 30, 30)
+
+    def divider():
+        pdf.set_draw_color(200, 210, 230)
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+        pdf.ln(2)
+
+    now_str = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    # ════════════════════════════════════════════════════
+    # PAGE 1 — RESUME EXECUTIF + CONSEILS SCALPING
+    # ════════════════════════════════════════════════════
     pdf.add_page()
 
-    pdf.set_font("Helvetica", "B", 22)
-    pdf.set_text_color(30, 100, 180)
-    pdf.cell(0, 15, _p("MARKET SENTIMENT PREDICTOR"), ln=True, align="C")
-
-    pdf.set_font("Helvetica", "", 11)
-    pdf.set_text_color(100, 100, 120)
-    pdf.cell(0, 8, _p(f"Rapport genere le {datetime.now().strftime('%d/%m/%Y a %H:%M:%S')}"), ln=True, align="C")
-    pdf.ln(5)
-
-    pdf.set_draw_color(30, 100, 180)
-    pdf.set_line_width(0.5)
-    pdf.line(15, pdf.get_y(), 195, pdf.get_y())
-    pdf.ln(8)
-
-    # Summary
-    pdf.set_font("Helvetica", "B", 14)
-    pdf.set_text_color(30, 100, 180)
-    pdf.cell(0, 10, _p("RESUME EXECUTIF"), ln=True)
-    pdf.set_font("Helvetica", "", 10)
-    pdf.set_text_color(60, 60, 80)
-    pdf.multi_cell(0, 6, _p(
-        f"Score Fondamental: {fund_score['combined']:.1f}/100 | "
-        f"Score Eco: {fund_score['eco_score']:.1f}/100 | "
-        f"Score News: {fund_score['news_score']:.1f}/100\n"
-        f"Actualites analysees: {fund_score['news_bull'] + fund_score['news_bear'] + fund_score['news_neutral']} | "
-        f"Positives: {fund_score['news_bull']} | Negatives: {fund_score['news_bear']} | Neutres: {fund_score['news_neutral']}"
-    ))
-    pdf.ln(5)
-
-    # Per market
-    for market_name, data in market_data.items():
-        pdf.set_font("Helvetica", "B", 12)
-        pdf.set_text_color(0, 140, 100)
-        pdf.cell(0, 10, _p(f"  {market_name}"), ln=True)
-
-        price_info = data.get("price_info", {})
-        if price_info:
-            pdf.set_font("Helvetica", "", 10)
-            pdf.set_text_color(60, 60, 80)
-            chg = price_info.get("change_pct", 0)
-            try:
-                price_str = f"{price_info.get('price', 0):.4g}"
-                high_str  = f"{price_info.get('high', 0):.4g}"
-                low_str   = f"{price_info.get('low',  0):.4g}"
-            except Exception:
-                price_str = high_str = low_str = "N/A"
-            pdf.cell(0, 6, _p(
-                f"    Prix: {price_str}  |  Variation: {chg:+.2f}%  |  H: {high_str}  L: {low_str}"
-            ), ln=True)
-
-        if market_name in predictions_all:
-            preds = predictions_all[market_name]
-            pdf.set_font("Helvetica", "B", 10)
-            pdf.set_text_color(60, 180, 200)
-            pdf.cell(0, 7, _p("    Predictions:"), ln=True)
-            pdf.set_font("Helvetica", "", 9)
-            for tf, pred in preds.items():
-                direction = pred["direction"]
-                bull = pred["bull_prob"]
-                bear = pred["bear_prob"]
-                conf = pred["confidence"]
-                if direction == "HAUSSIER":
-                    pdf.set_text_color(16, 140, 80)
-                elif direction == "BAISSIER":
-                    pdf.set_text_color(200, 50, 50)
-                else:
-                    pdf.set_text_color(50, 100, 200)
-                pdf.cell(0, 5, _p(
-                    f"      {tf:8s}: {direction:9s}  |  Hausse: {bull}%  |  Baisse: {bear}%  |  Confiance: {conf}%"
-                ), ln=True)
-
-        pdf.ln(3)
-
-    # Economic indicators
-    pdf.add_page()
-    pdf.set_font("Helvetica", "B", 14)
-    pdf.set_text_color(30, 100, 180)
-    pdf.cell(0, 10, _p("INDICATEURS ECONOMIQUES ET MACROECONOMIQUES"), ln=True)
+    # Header
+    pdf.set_fill_color(15, 52, 96)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, _p("MARKET SENTIMENT PREDICTOR"), ln=True, fill=True, align="C")
+    pdf.set_font("Helvetica", "", 8)
+    pdf.set_fill_color(30, 80, 150)
+    pdf.cell(0, 5, _p(f"Rapport genere le {now_str}  |  NASDAQ  S&P500  Or  CAC40  Euronext600  Petrole"), ln=True, fill=True, align="C")
     pdf.ln(3)
 
-    for name, data in ECONOMIC_INDICATORS.items():
-        impact = data["impact"]
-        trend  = data["trend"]
-        # Convert trend arrows to ascii
-        trend_ascii = ">>" if trend == "↗" else "<<" if trend == "↘" else "->"
-        if impact == "positif":
-            pdf.set_text_color(16, 140, 80)
-        elif impact in ("négatif", "negatif"):
-            pdf.set_text_color(200, 50, 50)
+    # ── Resume executif ──
+    title_bar("1. RESUME EXECUTIF — SCORES GLOBAUX")
+
+    # Scores en colonnes
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_fill_color(240, 245, 255)
+    pdf.set_text_color(20, 60, 130)
+    for label, val in [
+        ("Score Fondamental Global",  f"{fund_score['combined']:.1f} / 100"),
+        ("Score Macro-Economique",    f"{fund_score['eco_score']:.1f} / 100"),
+        ("Score Sentiment News",      f"{fund_score['news_score']:.1f} / 100"),
+        ("Actualites analysees",      f"{fund_score['news_bull']+fund_score['news_bear']+fund_score['news_neutral']} articles  |  +{fund_score['news_bull']} positives  -{fund_score['news_bear']} negatives  ={fund_score['news_neutral']} neutres"),
+    ]:
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_text_color(80, 80, 80)
+        pdf.cell(75, 5, _p(label))
+        pdf.set_font("Helvetica", "B", 8)
+        # Color based on value
+        if "Score" in label:
+            v = float(str(val).split("/")[0].strip())
+            if v >= 60:   pdf.set_text_color(0, 140, 80)
+            elif v <= 40: pdf.set_text_color(200, 40, 40)
+            else:         pdf.set_text_color(30, 100, 200)
         else:
-            pdf.set_text_color(50, 100, 200)
-        pdf.set_font("Helvetica", "", 9)
-        pdf.cell(0, 5, _p(
-            f"  {name:35s}: {str(data['value']):10s} {trend_ascii}  [{impact.upper()}]  poids: {data['weight']*100:.0f}%"
-        ), ln=True)
+            pdf.set_text_color(30, 30, 30)
+        pdf.cell(0, 5, _p(val), ln=True)
 
-    # Sources
+    pdf.ln(2)
+    divider()
+
+    # ── Previsions marches (tableau compact) ──
+    title_bar("2. PREVISIONS PAR MARCHE & HORIZON")
+
+    # Header tableau
+    pdf.set_fill_color(200, 215, 240)
+    pdf.set_text_color(20, 60, 130)
+    pdf.set_font("Helvetica", "B", 7)
+    pdf.cell(35, 5, "Marche",   fill=True, border=1)
+    pdf.cell(18, 5, "Prix",     fill=True, border=1)
+    pdf.cell(10, 5, "Var%",     fill=True, border=1)
+    for tf in ["5 min", "15 min", "60 min", "240 min"]:
+        pdf.cell(32, 5, tf, fill=True, border=1, align="C")
+    pdf.ln()
+
+    for mkt_name, mkt_data in market_data.items():
+        pi = mkt_data.get("price_info", {})
+        price = pi.get("price", 0)
+        chg   = pi.get("change_pct", 0)
+        try:
+            price_str = f"{price:,.2f}"
+            chg_str   = f"{chg:+.2f}%"
+        except Exception:
+            price_str = "N/A"
+            chg_str   = "N/A"
+
+        pdf.set_font("Helvetica", "B", 7)
+        pdf.set_text_color(30, 30, 30)
+        pdf.set_fill_color(250, 251, 255)
+        pdf.cell(35, 5, _p(mkt_name[:18]), fill=True, border=1)
+
+        pdf.set_font("Helvetica", "", 7)
+        pdf.cell(18, 5, _p(price_str), fill=True, border=1, align="R")
+
+        if chg >= 0: pdf.set_text_color(0, 130, 70)
+        else:        pdf.set_text_color(200, 40, 40)
+        pdf.cell(10, 5, _p(chg_str), fill=True, border=1, align="C")
+        pdf.set_text_color(30, 30, 30)
+
+        preds = predictions_all.get(mkt_name, {})
+        for tf in ["5 min", "15 min", "60 min", "240 min"]:
+            p = preds.get(tf, {})
+            d = p.get("direction", "—")
+            b = p.get("bull_prob", 50)
+            cell_txt = f"{d[:4]} {b}%"
+            if d == "HAUSSIER":   pdf.set_text_color(0, 130, 70);  pdf.set_fill_color(240, 255, 245)
+            elif d == "BAISSIER": pdf.set_text_color(200, 40, 40); pdf.set_fill_color(255, 242, 242)
+            else:                 pdf.set_text_color(30, 80, 180);  pdf.set_fill_color(242, 246, 255)
+            pdf.set_font("Helvetica", "B", 7)
+            pdf.cell(32, 5, _p(cell_txt), fill=True, border=1, align="C")
+        pdf.set_text_color(30, 30, 30)
+        pdf.ln()
+
+    pdf.ln(2)
+    divider()
+
+    # ── Conseils scalping tous horizons ──
+    title_bar("3. CONSEILS SCALPING — TOUS HORIZONS", r=0, g=100, b=80)
+
+    for mkt_name, tf_advices in scalp_advices.items():
+        if not tf_advices:
+            continue
+        section_bar(f">> {mkt_name}")
+
+        # Mini header
+        pdf.set_fill_color(230, 245, 240)
+        pdf.set_text_color(20, 80, 60)
+        pdf.set_font("Helvetica", "B", 7)
+        pdf.cell(20, 4, "Horizon",    fill=True, border=1)
+        pdf.cell(15, 4, "Conseil",    fill=True, border=1)
+        pdf.cell(22, 4, "Entry Long", fill=True, border=1, align="C")
+        pdf.cell(22, 4, "SL Long",    fill=True, border=1, align="C")
+        pdf.cell(22, 4, "TP1 Long",   fill=True, border=1, align="C")
+        pdf.cell(15, 4, "R:R",        fill=True, border=1, align="C")
+        pdf.cell(18, 4, "ProbGain",   fill=True, border=1, align="C")
+        pdf.cell(18, 4, f"G/P $",     fill=True, border=1, align="C")
+        pdf.cell(18, 4, "Prix actu",  fill=True, border=1, align="C")
+        pdf.ln()
+
+        for tf_name, adv in tf_advices.items():
+            if not adv:
+                continue
+            d = adv.get("direction", "—")
+            conseil = adv.get("main_advice", "—")[:14]
+            entry_l = adv.get("entry_long", 0)
+            sl_l    = adv.get("sl_long", 0)
+            tp1_l   = adv.get("tp1_long", 0)
+            rr_l    = adv.get("rr_long", 0)
+            pg_l    = adv.get("prob_gain_long", 0)
+            gain_l  = adv.get("gain_long", 0)
+            loss_l  = adv.get("loss_long", 0)
+            cp      = adv.get("current_price", 0)
+
+            if d == "HAUSSIER":   pdf.set_text_color(0, 120, 60);  pdf.set_fill_color(245, 255, 248)
+            elif d == "BAISSIER": pdf.set_text_color(180, 30, 30); pdf.set_fill_color(255, 245, 245)
+            else:                 pdf.set_text_color(40, 80, 170); pdf.set_fill_color(245, 248, 255)
+
+            pdf.set_font("Helvetica", "B", 7)
+            pdf.cell(20, 4, _p(tf_name), fill=True, border=1)
+            pdf.set_font("Helvetica", "", 7)
+            pdf.cell(15, 4, _p(conseil), fill=True, border=1)
+            pdf.set_text_color(0, 120, 60)
+            pdf.cell(22, 4, _p(f"{entry_l:,.4f}"), fill=True, border=1, align="R")
+            pdf.set_text_color(180, 30, 30)
+            pdf.cell(22, 4, _p(f"{sl_l:,.4f}"),    fill=True, border=1, align="R")
+            pdf.set_text_color(200, 130, 0)
+            pdf.cell(22, 4, _p(f"{tp1_l:,.4f}"),   fill=True, border=1, align="R")
+            # RR color
+            if rr_l >= 1.5:   pdf.set_text_color(0, 120, 60)
+            elif rr_l >= 1.0: pdf.set_text_color(200, 130, 0)
+            else:             pdf.set_text_color(180, 30, 30)
+            pdf.set_font("Helvetica", "B", 7)
+            pdf.cell(15, 4, _p(f"1:{rr_l}"), fill=True, border=1, align="C")
+            # Prob gain
+            if pg_l >= 60:   pdf.set_text_color(0, 120, 60)
+            elif pg_l >= 50: pdf.set_text_color(200, 130, 0)
+            else:            pdf.set_text_color(180, 30, 30)
+            pdf.cell(18, 4, _p(f"{pg_l}%"), fill=True, border=1, align="C")
+            # G/P
+            pdf.set_text_color(30, 30, 30)
+            pdf.set_font("Helvetica", "", 7)
+            pdf.cell(18, 4, _p(f"+{gain_l:.2f}/-{loss_l:.2f}"), fill=True, border=1, align="C")
+            pdf.cell(18, 4, _p(f"{cp:,.3f}"), fill=True, border=1, align="R")
+            pdf.ln()
+
+        pdf.ln(1)
+
+    # ════════════════════════════════════════════════════
+    # PAGE 2 — INDICATEURS TECHNIQUES
+    # ════════════════════════════════════════════════════
     pdf.add_page()
-    pdf.set_font("Helvetica", "B", 14)
-    pdf.set_text_color(30, 100, 180)
-    pdf.cell(0, 10, _p("SOURCES ET METHODOLOGIE"), ln=True)
+
+    pdf.set_fill_color(15, 52, 96)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, _p("INDICATEURS TECHNIQUES PAR MARCHE"), ln=True, fill=True, align="C")
+    pdf.set_font("Helvetica", "", 7)
+    pdf.set_fill_color(30, 80, 150)
+    pdf.cell(0, 4, _p(f"Genere le {now_str}"), ln=True, fill=True, align="C")
     pdf.ln(3)
 
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.set_text_color(0, 140, 100)
-    pdf.cell(0, 8, _p("Donnees de marche:"), ln=True)
-    pdf.set_font("Helvetica", "", 10)
-    pdf.set_text_color(60, 60, 80)
-    pdf.multi_cell(0, 6, _p(
-        "- Yahoo Finance (yfinance) : donnees OHLCV en temps reel et historiques\n"
-        "- Intervalles: 5min, 15min, 60min, 240min\n"
-        "- Tickers: ^NDX, ^GSPC, GC=F, ^FCHI, ^STOXX, CL=F"
-    ))
+    TECH_INDICATORS = [
+        ("RSI (14)",       "RSI",        lambda v: f"{v:.1f}",   lambda v: ("SURBUY" if v>70 else "SURVENTE" if v<30 else "NEUTRE"), lambda v: (0,130,70) if v<30 else (180,30,30) if v>70 else (40,80,170)),
+        ("EMA 9",          "EMA9",       lambda v: f"{v:,.3f}",  lambda v: "—", lambda v: (30,30,30)),
+        ("EMA 21",         "EMA21",      lambda v: f"{v:,.3f}",  lambda v: "—", lambda v: (30,30,30)),
+        ("MACD",           "MACD",       lambda v: f"{v:.4f}",   lambda v: ("BULL" if v>0 else "BEAR"), lambda v: (0,130,70) if v>0 else (180,30,30)),
+        ("BB Upper",       "BB_upper",   lambda v: f"{v:,.3f}",  lambda v: "—", lambda v: (30,30,30)),
+        ("BB Lower",       "BB_lower",   lambda v: f"{v:,.3f}",  lambda v: "—", lambda v: (30,30,30)),
+        ("ATR (14)",       "ATR",        lambda v: f"{v:.4f}",   lambda v: "—", lambda v: (30,30,30)),
+        ("Stoch K",        "Stoch_K",    lambda v: f"{v:.1f}",   lambda v: ("OVERBOUGHT" if v>80 else "OVERSOLD" if v<20 else "NEUTRE"), lambda v: (180,30,30) if v>80 else (0,130,70) if v<20 else (30,30,30)),
+    ]
+
+    for mkt_name, mkt_data in market_data.items():
+        df_mkt = mkt_data.get("df", pd.DataFrame())
+        if df_mkt.empty or len(df_mkt) < 15:
+            continue
+
+        # Compute indicators
+        try:
+            df_ind = compute_indicators(df_mkt.copy())
+        except Exception:
+            continue
+
+        last = df_ind.iloc[-1]
+        pi   = mkt_data.get("price_info", {})
+        price = pi.get("price", last.get("Close", 0))
+        chg   = pi.get("change_pct", 0)
+
+        section_bar(f"{mkt_name}  |  Prix: {price:,.3f}  |  Var: {chg:+.2f}%")
+
+        # Table header
+        pdf.set_fill_color(220, 230, 245)
+        pdf.set_text_color(20, 60, 130)
+        pdf.set_font("Helvetica", "B", 7)
+        pdf.cell(35, 4, "Indicateur", fill=True, border=1)
+        pdf.cell(35, 4, "Valeur",     fill=True, border=1, align="R")
+        pdf.cell(30, 4, "Signal",     fill=True, border=1, align="C")
+        pdf.ln()
+
+        for label, col, fmt, signal_fn, color_fn in TECH_INDICATORS:
+            val = last.get(col, None)
+            if val is None or (isinstance(val, float) and np.isnan(val)):
+                continue
+            sig   = signal_fn(val)
+            r,g,b = color_fn(val)
+            pdf.set_font("Helvetica", "", 7)
+            pdf.set_text_color(60, 60, 60)
+            pdf.set_fill_color(250, 251, 255)
+            pdf.cell(35, 4, _p(label), fill=True, border=1)
+            pdf.set_text_color(r, g, b)
+            pdf.cell(35, 4, _p(fmt(val)), fill=True, border=1, align="R")
+            pdf.cell(30, 4, _p(sig),      fill=True, border=1, align="C")
+            pdf.ln()
+
+        pdf.ln(2)
+
+    # ════════════════════════════════════════════════════
+    # PAGE 3 — ACTUALITES & SENTIMENT NEWS
+    # ════════════════════════════════════════════════════
+    pdf.add_page()
+
+    pdf.set_fill_color(15, 52, 96)
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, _p("ACTUALITES & SENTIMENT NEWS"), ln=True, fill=True, align="C")
+    pdf.set_font("Helvetica", "", 7)
+    pdf.set_fill_color(30, 80, 150)
+    pdf.cell(0, 4, _p(f"Genere le {now_str}  |  Analyse NLP TextBlob sur flux RSS"), ln=True, fill=True, align="C")
     pdf.ln(3)
 
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.set_text_color(0, 140, 100)
-    pdf.cell(0, 8, _p("Sources d'actualites (RSS):"), ln=True)
-    pdf.set_font("Helvetica", "", 10)
-    pdf.set_text_color(60, 60, 80)
-    for source in RSS_FEEDS.keys():
-        pdf.cell(0, 5, _p(f"  - {source}"), ln=True)
-    pdf.ln(3)
+    # Stats sentiment
+    nb_pos = fund_score["news_bull"]
+    nb_neg = fund_score["news_bear"]
+    nb_neu = fund_score["news_neutral"]
+    total  = nb_pos + nb_neg + nb_neu
 
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.set_text_color(0, 140, 100)
-    pdf.cell(0, 8, _p("Indicateurs techniques utilises:"), ln=True)
-    pdf.set_font("Helvetica", "", 10)
-    pdf.set_text_color(60, 60, 80)
-    pdf.multi_cell(0, 6, _p(
-        "- EMA 9, EMA 21, SMA 50, SMA 200\n"
-        "- RSI (14 periodes)\n"
-        "- MACD (12, 26, 9)\n"
-        "- Bandes de Bollinger (20 periodes, 2 ecarts-types)\n"
-        "- Stochastique (14, 3)\n"
-        "- ATR (Average True Range)\n"
-        "- OBV (On-Balance Volume)\n"
-        "- Volume SMA (20 periodes)"
-    ))
-    pdf.ln(3)
+    title_bar("RESUME SENTIMENT", r=40, g=40, b=120)
+    pdf.set_font("Helvetica", "", 8)
+    pdf.set_text_color(30, 30, 30)
+    pdf.cell(0, 5, _p(
+        f"Total: {total} articles  |  "
+        f"Positifs: {nb_pos} ({nb_pos/max(total,1)*100:.0f}%)  |  "
+        f"Negatifs: {nb_neg} ({nb_neg/max(total,1)*100:.0f}%)  |  "
+        f"Neutres: {nb_neu} ({nb_neu/max(total,1)*100:.0f}%)"
+    ), ln=True)
+    pdf.ln(2)
 
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.set_text_color(0, 140, 100)
-    pdf.cell(0, 8, _p("Methodologie de prediction:"), ln=True)
-    pdf.set_font("Helvetica", "", 10)
-    pdf.set_text_color(60, 60, 80)
-    pdf.multi_cell(0, 6, _p(
-        "- Scoring technique: 8 indicateurs ponderes (RSI, MACD, EMA, BB, Stoch, Volume, Momentum)\n"
-        "- Scoring fondamental: 20 indicateurs macro + analyse NLP des actualites (TextBlob)\n"
-        "- Ponderation CT (5min/15min) = 80% tech + 20% macro\n"
-        "  MT (60min) = 65% tech + 35% macro | LT (240min) = 50/50\n"
-        "- Analyse de sentiment: polarite et subjectivite des titres d'articles\n"
-        "AVERTISSEMENT: Ces predictions sont a des fins educatives uniquement."
-    ))
+    # Table articles
+    title_bar("TOP ACTUALITES ANALYSEES", r=40, g=40, b=120)
 
-    pdf.set_font("Helvetica", "I", 8)
-    pdf.set_text_color(100, 100, 100)
-    pdf.ln(10)
-    pdf.multi_cell(0, 5, _p(
-        "AVERTISSEMENT LEGAL: Ce rapport est genere automatiquement a des fins informatives et educatives "
-        "uniquement. Il ne constitue pas un conseil financier. Les marches financiers sont risques. "
-        "Consultez un conseiller financier avant toute decision d'investissement."
+    pdf.set_fill_color(220, 225, 245)
+    pdf.set_text_color(20, 50, 130)
+    pdf.set_font("Helvetica", "B", 7)
+    pdf.cell(20, 4, "Sentiment", fill=True, border=1, align="C")
+    pdf.cell(18, 4, "Polarite",  fill=True, border=1, align="C")
+    pdf.cell(42, 4, "Source",    fill=True, border=1)
+    pdf.cell(0,  4, "Titre",     fill=True, border=1)
+    pdf.ln()
+
+    # Sort: most positive first, then most negative
+    sorted_news = sorted(news_articles, key=lambda a: abs(a.get("polarity", 0)), reverse=True)
+
+    for article in sorted_news[:40]:
+        sentiment = article.get("sentiment", "neutre")
+        polarity  = article.get("polarity", 0)
+        source    = article.get("source", "")[:20]
+        title     = article.get("title", "")[:75]
+
+        if sentiment == "positif":
+            pdf.set_fill_color(242, 255, 247)
+            pdf.set_text_color(0, 130, 60)
+            sent_txt = "POSITIF"
+        elif sentiment == "negatif" or sentiment == "négatif":
+            pdf.set_fill_color(255, 242, 242)
+            pdf.set_text_color(180, 30, 30)
+            sent_txt = "NEGATIF"
+        else:
+            pdf.set_fill_color(245, 247, 255)
+            pdf.set_text_color(60, 80, 160)
+            sent_txt = "NEUTRE"
+
+        pdf.set_font("Helvetica", "B", 6)
+        pdf.cell(20, 4, _p(sent_txt),              fill=True, border=1, align="C")
+        pdf.set_font("Helvetica", "", 6)
+        pdf.cell(18, 4, _p(f"{polarity:+.3f}"),    fill=True, border=1, align="C")
+        pdf.set_text_color(60, 60, 60)
+        pdf.cell(42, 4, _p(source),                fill=True, border=1)
+        pdf.cell(0,  4, _p(title),                 fill=True, border=1)
+        pdf.ln()
+
+    # Footer avertissement
+    pdf.ln(5)
+    pdf.set_font("Helvetica", "I", 7)
+    pdf.set_text_color(130, 130, 130)
+    pdf.multi_cell(0, 4, _p(
+        "AVERTISSEMENT: Ce rapport est genere automatiquement a des fins educatives uniquement. "
+        "Il ne constitue pas un conseil financier. Consultez un professionnel avant toute decision d'investissement."
     ))
 
     return bytes(pdf.output())
+
 
 
 
@@ -1531,9 +1772,18 @@ def main():
             )
 
         # ── Compute ──
-        scalp_pred = all_predictions[scalp_market].get(scalp_tf, {})
-        scalp_df   = all_market_prices[scalp_market]["df"]
-        advice     = compute_scalp_advice(scalp_df, scalp_pred, scalp_market, scalp_tf, trade_size)
+        scalp_pred  = all_predictions[scalp_market].get(scalp_tf, {})
+        # Fetch fresh df for the chosen scalp timeframe (may differ from sidebar)
+        scalp_tf_info = TIMEFRAMES[scalp_tf]
+        scalp_df = fetch_ohlc(
+            MARKETS[scalp_market]["ticker"],
+            scalp_tf_info["yf_period"],
+            scalp_tf_info["yf_interval"]
+        )
+        # Fallback to dashboard df if not enough data
+        if scalp_df.empty or len(scalp_df) < 5:
+            scalp_df = all_market_prices[scalp_market]["df"]
+        advice = compute_scalp_advice(scalp_df, scalp_pred, scalp_market, scalp_tf, trade_size)
 
         if not advice:
             st.error("Données insuffisantes pour générer des conseils.")
@@ -1801,7 +2051,23 @@ def main():
         if st.button("📥 Générer rapport PDF", use_container_width=True, type="primary"):
             with st.spinner("Génération du rapport..."):
                 try:
-                    pdf_bytes = generate_pdf_report(all_market_prices, all_predictions, fund_data)
+                    # Build scalp_advices for all markets x all timeframes
+                    scalp_advices_pdf = {}
+                    for mn, minfo_pdf in MARKETS.items():
+                        scalp_advices_pdf[mn] = {}
+                        df_pdf = all_market_prices[mn]["df"]
+                        for tf_pdf in TIMEFRAMES.keys():
+                            p_pdf = all_predictions[mn].get(tf_pdf, {})
+                            scalp_advices_pdf[mn][tf_pdf] = compute_scalp_advice(
+                                df_pdf, p_pdf, mn, tf_pdf, 100.0
+                            )
+                    pdf_bytes = generate_pdf_report(
+                        all_market_prices,
+                        all_predictions,
+                        fund_data,
+                        news_articles=news_articles,
+                        scalp_advices=scalp_advices_pdf,
+                    )
                     b64 = base64.b64encode(pdf_bytes).decode()
                     filename = f"market_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
                     href = (
