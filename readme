@@ -1,0 +1,52 @@
+# 📈 Market Sentiment Predictor
+
+Application Streamlit d'analyse de sentiment et de prédiction des marchés financiers.
+
+## 🎯 Fonctionnalités
+
+- **Marchés couverts** : NASDAQ 100, S&P 500, Or, CAC 40, Euronext 600, Pétrole (WTI)
+- **Prédictions** : 5 min, 15 min, 60 min, 240 min avec probabilités
+- **Analyse technique** : 8 indicateurs (RSI, MACD, EMA, Bollinger, Stochastique, Volume, OBV, ATR)
+- **Analyse macro** : 20 indicateurs économiques, géopolitiques et financiers
+- **Sentiment NLP** : Analyse des actualités via flux RSS (10 sources)
+- **Graphiques OHLCV** interactifs avec Plotly
+- **Rapport PDF** exportable
+
+## 🚀 Installation locale
+
+```bash
+git clone https://github.com/VOTRE_USERNAME/market-sentiment-predictor
+cd market-sentiment-predictor
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+## ☁️ Déploiement sur Streamlit Cloud
+
+1. Fork ce repo sur GitHub
+2. Connectez-vous sur [share.streamlit.io](https://share.streamlit.io)
+3. Cliquez "New app" → Sélectionnez votre repo → `app.py`
+4. Cliquez "Deploy"
+
+## 📊 Sources de données
+
+| Source | Type |
+|--------|------|
+| Yahoo Finance (yfinance) | Prix OHLCV temps réel |
+| Reuters, Bloomberg, FT | Flux RSS actualités |
+| MarketWatch, CNBC | Actualités financières |
+| Les Echos, Le Monde | Actualités françaises |
+| ECB News | Banque Centrale Européenne |
+
+## ⚠️ Avertissement
+
+Cette application est fournie à des fins **éducatives uniquement**. Elle ne constitue pas un conseil financier.
+
+## 📦 Technologies
+
+- [Streamlit](https://streamlit.io) — Interface web
+- [yfinance](https://github.com/ranaroussi/yfinance) — Données de marché
+- [Plotly](https://plotly.com) — Visualisations
+- [TextBlob](https://textblob.readthedocs.io) — Analyse NLP
+- [feedparser](https://feedparser.readthedocs.io) — RSS
+- [FPDF2](https://pyfpdf.github.io/fpdf2/) — Export PDF
