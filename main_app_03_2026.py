@@ -836,71 +836,258 @@ def make_eco_indicators_chart() -> go.Figure:
     return fig
 
 
+
 # ─────────────────────────────────────────────────────────────
-# PDF REPORT
+# HELPER: sanitize text for PDF (remove non-latin1 chars)
+# ─────────────────────────────────────────────────────────────
+def _p(text: str) -> str:
+    """Remove characters not supported by FPDF Helvetica (latin-1 only)."""
+    # Replace common unicode arrows and special chars
+    replacements = {
+        '↗': '>>', '↘': '<<', '→': '->', '←': '<-',
+        '↑': '^',  '↓': 'v',  '•': '-',  '–': '-',
+        '—': '-',  '…': '...','é': 'e',  'è': 'e',
+        'ê': 'e',  'ë': 'e',  'à': 'a',  'â': 'a',
+        'ù': 'u',  'û': 'u',  'î': 'i',  'ï': 'i',
+        'ô': 'o',  'ç': 'c',  'É': 'E',  'È': 'E',
+        'Ê': 'E',  'À': 'A',  'Â': 'A',  'Î': 'I',
+        'Ô': 'O',  'Û': 'U',  'Ç': 'C',  '°': 'deg',
+        '²': '2',  '³': '3',  '½': '1/2','¼': '1/4',
+        '\u2019': "'", '\u2018': "'", '\u201c': '"', '\u201d': '"',
+    }
+    for orig, repl in replacements.items():
+        text = text.replace(orig, repl)
+    # Final pass: encode to latin-1, replacing anything else
+    return text.encode('latin-1', errors='replace').decode('latin-1')
+
+
+# ─────────────────────────────────────────────────────────────
+# SCALPING CONSEILS ENGINE
+# ─────────────────────────────────────────────────────────────
+def compute_scalp_advice(df: pd.DataFrame, pred: dict, market_name: str, timeframe: str, trade_size: float = 100.0) -> dict:
+    """Compute entry/exit levels and trade advice for scalpers."""
+    if df.empty or len(df) < 20:
+        return {}
+
+    df = compute_indicators(df)
+    last = df.iloc[-1]
+
+    current_price = last["Close"]
+    atr = last.get("ATR", current_price * 0.001)
+    if np.isnan(atr) or atr == 0:
+        atr = current_price * 0.001
+
+    direction  = pred.get("direction", "NEUTRE")
+    bull_prob  = pred.get("bull_prob", 50)
+    bear_prob  = pred.get("bear_prob", 50)
+    confidence = pred.get("confidence", 0)
+
+    # ATR multipliers by timeframe
+    tf_mult = {"5 min": 0.8, "15 min": 1.2, "60 min": 2.0, "240 min": 3.5}
+    mult = tf_mult.get(timeframe, 1.0)
+
+    bb_upper = last.get("BB_upper", current_price * 1.005)
+    bb_lower = last.get("BB_lower", current_price * 0.995)
+    ema9     = last.get("EMA9",     current_price)
+    ema21    = last.get("EMA21",    current_price)
+    rsi      = last.get("RSI",      50)
+
+    if np.isnan(bb_upper): bb_upper = current_price * 1.005
+    if np.isnan(bb_lower): bb_lower = current_price * 0.995
+    if np.isnan(ema9):     ema9     = current_price
+    if np.isnan(ema21):    ema21    = current_price
+    if np.isnan(rsi):      rsi      = 50
+
+    # ── LONG setup ──
+    if direction == "HAUSSIER":
+        entry_long   = round(current_price * 1.0001, 4)          # légèrement au-dessus du bid
+        sl_long      = round(current_price - atr * mult * 1.2, 4)
+        tp1_long     = round(current_price + atr * mult * 1.5, 4)
+        tp2_long     = round(current_price + atr * mult * 2.5, 4)
+        tp3_long     = round(min(bb_upper, current_price + atr * mult * 4), 4)
+        rr_long      = round((tp1_long - entry_long) / max(entry_long - sl_long, 0.0001), 2)
+
+        entry_short  = round(current_price * 0.9999, 4)
+        sl_short     = round(current_price + atr * mult * 2.0, 4)  # SL serré contre-trend
+        tp1_short    = round(current_price - atr * mult * 0.8, 4)
+        tp2_short    = round(current_price - atr * mult * 1.5, 4)
+        tp3_short    = None
+        rr_short     = round((entry_short - tp1_short) / max(sl_short - entry_short, 0.0001), 2)
+
+    elif direction == "BAISSIER":
+        entry_short  = round(current_price * 0.9999, 4)
+        sl_short     = round(current_price + atr * mult * 1.2, 4)
+        tp1_short    = round(current_price - atr * mult * 1.5, 4)
+        tp2_short    = round(current_price - atr * mult * 2.5, 4)
+        tp3_short    = round(max(bb_lower, current_price - atr * mult * 4), 4)
+        rr_short     = round((entry_short - tp1_short) / max(sl_short - entry_short, 0.0001), 2)
+
+        entry_long   = round(current_price * 1.0001, 4)
+        sl_long      = round(current_price - atr * mult * 2.0, 4)
+        tp1_long     = round(current_price + atr * mult * 0.8, 4)
+        tp2_long     = round(current_price + atr * mult * 1.5, 4)
+        tp3_long     = None
+        rr_long      = round((tp1_long - entry_long) / max(entry_long - sl_long, 0.0001), 2)
+
+    else:  # NEUTRE
+        entry_long   = round(bb_lower * 1.001, 4)
+        sl_long      = round(bb_lower * 0.998, 4)
+        tp1_long     = round(current_price, 4)
+        tp2_long     = round(bb_upper * 0.999, 4)
+        tp3_long     = None
+        rr_long      = round((tp1_long - entry_long) / max(entry_long - sl_long, 0.0001), 2)
+
+        entry_short  = round(bb_upper * 0.999, 4)
+        sl_short     = round(bb_upper * 1.002, 4)
+        tp1_short    = round(current_price, 4)
+        tp2_short    = round(bb_lower * 1.001, 4)
+        tp3_short    = None
+        rr_short     = round((entry_short - tp1_short) / max(sl_short - entry_short, 0.0001), 2)
+
+    # ── P&L sur 100$ ──
+    def pnl_calc(entry, tp1, sl, size=100.0):
+        if entry == 0:
+            return 0, 0
+        gain_pct = abs(tp1 - entry) / entry * 100
+        loss_pct = abs(sl  - entry) / entry * 100
+        gain_usd = round(size * gain_pct / 100, 2)
+        loss_usd = round(size * loss_pct / 100, 2)
+        return gain_usd, loss_usd
+
+    gain_long,  loss_long  = pnl_calc(entry_long,  tp1_long,  sl_long,  trade_size)
+    gain_short, loss_short = pnl_calc(entry_short, tp1_short, sl_short, trade_size)
+
+    # ── Probabilité de gain ──
+    # basée sur bull_prob + RSI + confidence
+    rsi_bias_long  = (rsi - 50) / 50  # positif si RSI > 50
+    prob_gain_long  = min(95, max(5, bull_prob + rsi_bias_long * 5 + confidence * 0.1))
+    prob_gain_short = min(95, max(5, bear_prob - rsi_bias_long * 5 + confidence * 0.1))
+
+    # ── Résumé conseil ──
+    if direction == "HAUSSIER" and confidence >= 40:
+        main_advice = "LONG PRIORITAIRE"
+        advice_color = "#10b981"
+        advice_icon = "🟢"
+    elif direction == "BAISSIER" and confidence >= 40:
+        main_advice = "SHORT PRIORITAIRE"
+        advice_color = "#ef4444"
+        advice_icon = "🔴"
+    elif rsi < 30:
+        main_advice = "LONG (RSI oversold)"
+        advice_color = "#10b981"
+        advice_icon = "🟢"
+    elif rsi > 70:
+        main_advice = "SHORT (RSI overbought)"
+        advice_color = "#ef4444"
+        advice_icon = "🔴"
+    else:
+        main_advice = "ATTENDRE SIGNAL CLAIR"
+        advice_color = "#3b82f6"
+        advice_icon = "⚪"
+
+    return {
+        "current_price": current_price,
+        "atr": atr,
+        "rsi": rsi,
+        "direction": direction,
+        "bull_prob": bull_prob,
+        "bear_prob": bear_prob,
+        "confidence": confidence,
+        "main_advice": main_advice,
+        "advice_color": advice_color,
+        "advice_icon": advice_icon,
+        # Long
+        "entry_long":  entry_long,
+        "sl_long":     sl_long,
+        "tp1_long":    tp1_long,
+        "tp2_long":    tp2_long,
+        "tp3_long":    tp3_long,
+        "rr_long":     rr_long,
+        "gain_long":   gain_long,
+        "loss_long":   loss_long,
+        "prob_gain_long": round(prob_gain_long, 1),
+        # Short
+        "entry_short": entry_short,
+        "sl_short":    sl_short,
+        "tp1_short":   tp1_short,
+        "tp2_short":   tp2_short,
+        "tp3_short":   tp3_short,
+        "rr_short":    rr_short,
+        "gain_short":  gain_short,
+        "loss_short":  loss_short,
+        "prob_gain_short": round(prob_gain_short, 1),
+        # Levels
+        "bb_upper": round(bb_upper, 4),
+        "bb_lower": round(bb_lower, 4),
+        "ema9":     round(ema9, 4),
+        "ema21":    round(ema21, 4),
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# PDF REPORT  (fixed: all text sanitized via _p())
 # ─────────────────────────────────────────────────────────────
 def generate_pdf_report(market_data: dict, predictions_all: dict, fund_score: dict) -> bytes:
-    """Generate a PDF report."""
+    """Generate a PDF report — all text sanitized for latin-1."""
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    
-    # Title
-    pdf.set_fill_color(14, 17, 23)
-    pdf.rect(0, 0, 210, 297, "F")
-    
+
     pdf.set_font("Helvetica", "B", 22)
-    pdf.set_text_color(0, 212, 255)
-    pdf.cell(0, 15, "MARKET SENTIMENT PREDICTOR", ln=True, align="C")
-    
+    pdf.set_text_color(30, 100, 180)
+    pdf.cell(0, 15, _p("MARKET SENTIMENT PREDICTOR"), ln=True, align="C")
+
     pdf.set_font("Helvetica", "", 11)
-    pdf.set_text_color(136, 146, 176)
-    pdf.cell(0, 8, f"Rapport genere le {datetime.now().strftime('%d/%m/%Y a %H:%M:%S')}", ln=True, align="C")
+    pdf.set_text_color(100, 100, 120)
+    pdf.cell(0, 8, _p(f"Rapport genere le {datetime.now().strftime('%d/%m/%Y a %H:%M:%S')}"), ln=True, align="C")
     pdf.ln(5)
-    
-    # Separator
-    pdf.set_draw_color(0, 212, 255)
+
+    pdf.set_draw_color(30, 100, 180)
     pdf.set_line_width(0.5)
     pdf.line(15, pdf.get_y(), 195, pdf.get_y())
     pdf.ln(8)
-    
+
     # Summary
     pdf.set_font("Helvetica", "B", 14)
-    pdf.set_text_color(0, 212, 255)
-    pdf.cell(0, 10, "RESUME EXECUTIF", ln=True)
+    pdf.set_text_color(30, 100, 180)
+    pdf.cell(0, 10, _p("RESUME EXECUTIF"), ln=True)
     pdf.set_font("Helvetica", "", 10)
-    pdf.set_text_color(204, 214, 246)
-    pdf.multi_cell(0, 6, 
+    pdf.set_text_color(60, 60, 80)
+    pdf.multi_cell(0, 6, _p(
         f"Score Fondamental: {fund_score['combined']:.1f}/100 | "
         f"Score Eco: {fund_score['eco_score']:.1f}/100 | "
         f"Score News: {fund_score['news_score']:.1f}/100\n"
         f"Actualites analysees: {fund_score['news_bull'] + fund_score['news_bear'] + fund_score['news_neutral']} | "
         f"Positives: {fund_score['news_bull']} | Negatives: {fund_score['news_bear']} | Neutres: {fund_score['news_neutral']}"
-    )
+    ))
     pdf.ln(5)
-    
+
     # Per market
     for market_name, data in market_data.items():
         pdf.set_font("Helvetica", "B", 12)
-        pdf.set_text_color(100, 255, 218)
-        pdf.cell(0, 10, f"  {market_name}", ln=True)
-        
+        pdf.set_text_color(0, 140, 100)
+        pdf.cell(0, 10, _p(f"  {market_name}"), ln=True)
+
         price_info = data.get("price_info", {})
         if price_info:
             pdf.set_font("Helvetica", "", 10)
-            pdf.set_text_color(204, 214, 246)
+            pdf.set_text_color(60, 60, 80)
             chg = price_info.get("change_pct", 0)
-            pdf.cell(0, 6, 
-                f"    Prix: {price_info.get('price', 'N/A'):.4g}  |  "
-                f"Variation: {chg:+.2f}%  |  "
-                f"H: {price_info.get('high', 'N/A'):.4g}  L: {price_info.get('low', 'N/A'):.4g}",
-                ln=True)
-        
+            try:
+                price_str = f"{price_info.get('price', 0):.4g}"
+                high_str  = f"{price_info.get('high', 0):.4g}"
+                low_str   = f"{price_info.get('low',  0):.4g}"
+            except Exception:
+                price_str = high_str = low_str = "N/A"
+            pdf.cell(0, 6, _p(
+                f"    Prix: {price_str}  |  Variation: {chg:+.2f}%  |  H: {high_str}  L: {low_str}"
+            ), ln=True)
+
         if market_name in predictions_all:
             preds = predictions_all[market_name]
             pdf.set_font("Helvetica", "B", 10)
-            pdf.set_text_color(139, 233, 253)
-            pdf.cell(0, 7, "    Predictions:", ln=True)
+            pdf.set_text_color(60, 180, 200)
+            pdf.cell(0, 7, _p("    Predictions:"), ln=True)
             pdf.set_font("Helvetica", "", 9)
             for tf, pred in preds.items():
                 direction = pred["direction"]
@@ -908,72 +1095,74 @@ def generate_pdf_report(market_data: dict, predictions_all: dict, fund_score: di
                 bear = pred["bear_prob"]
                 conf = pred["confidence"]
                 if direction == "HAUSSIER":
-                    pdf.set_text_color(16, 185, 129)
+                    pdf.set_text_color(16, 140, 80)
                 elif direction == "BAISSIER":
-                    pdf.set_text_color(239, 68, 68)
+                    pdf.set_text_color(200, 50, 50)
                 else:
-                    pdf.set_text_color(59, 130, 246)
-                pdf.cell(0, 5, 
-                    f"      {tf:8s}: {direction:9s}  |  Hausse: {bull}%  |  Baisse: {bear}%  |  Confiance: {conf}%",
-                    ln=True)
-        
+                    pdf.set_text_color(50, 100, 200)
+                pdf.cell(0, 5, _p(
+                    f"      {tf:8s}: {direction:9s}  |  Hausse: {bull}%  |  Baisse: {bear}%  |  Confiance: {conf}%"
+                ), ln=True)
+
         pdf.ln(3)
-    
+
     # Economic indicators
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 14)
-    pdf.set_text_color(0, 212, 255)
-    pdf.cell(0, 10, "INDICATEURS ECONOMIQUES & MACROECONOMIQUES", ln=True)
+    pdf.set_text_color(30, 100, 180)
+    pdf.cell(0, 10, _p("INDICATEURS ECONOMIQUES ET MACROECONOMIQUES"), ln=True)
     pdf.ln(3)
-    
+
     for name, data in ECONOMIC_INDICATORS.items():
         impact = data["impact"]
+        trend  = data["trend"]
+        # Convert trend arrows to ascii
+        trend_ascii = ">>" if trend == "↗" else "<<" if trend == "↘" else "->"
         if impact == "positif":
-            pdf.set_text_color(16, 185, 129)
-        elif impact == "négatif":
-            pdf.set_text_color(239, 68, 68)
+            pdf.set_text_color(16, 140, 80)
+        elif impact in ("négatif", "negatif"):
+            pdf.set_text_color(200, 50, 50)
         else:
-            pdf.set_text_color(59, 130, 246)
-        
+            pdf.set_text_color(50, 100, 200)
         pdf.set_font("Helvetica", "", 9)
-        pdf.cell(0, 5,
-            f"  {name:35s}: {str(data['value']):10s} {data['trend']}  [{impact.upper()}]  poids: {data['weight']*100:.0f}%",
-            ln=True)
-    
+        pdf.cell(0, 5, _p(
+            f"  {name:35s}: {str(data['value']):10s} {trend_ascii}  [{impact.upper()}]  poids: {data['weight']*100:.0f}%"
+        ), ln=True)
+
     # Sources
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 14)
-    pdf.set_text_color(0, 212, 255)
-    pdf.cell(0, 10, "SOURCES & METHODOLOGIE", ln=True)
+    pdf.set_text_color(30, 100, 180)
+    pdf.cell(0, 10, _p("SOURCES ET METHODOLOGIE"), ln=True)
     pdf.ln(3)
-    
+
     pdf.set_font("Helvetica", "B", 11)
-    pdf.set_text_color(100, 255, 218)
-    pdf.cell(0, 8, "Donnees de marche:", ln=True)
+    pdf.set_text_color(0, 140, 100)
+    pdf.cell(0, 8, _p("Donnees de marche:"), ln=True)
     pdf.set_font("Helvetica", "", 10)
-    pdf.set_text_color(204, 214, 246)
-    pdf.multi_cell(0, 6,
+    pdf.set_text_color(60, 60, 80)
+    pdf.multi_cell(0, 6, _p(
         "- Yahoo Finance (yfinance) : donnees OHLCV en temps reel et historiques\n"
         "- Intervalles: 5min, 15min, 60min, 240min\n"
         "- Tickers: ^NDX, ^GSPC, GC=F, ^FCHI, ^STOXX, CL=F"
-    )
+    ))
     pdf.ln(3)
-    
+
     pdf.set_font("Helvetica", "B", 11)
-    pdf.set_text_color(100, 255, 218)
-    pdf.cell(0, 8, "Sources d'actualites (RSS):", ln=True)
+    pdf.set_text_color(0, 140, 100)
+    pdf.cell(0, 8, _p("Sources d'actualites (RSS):"), ln=True)
     pdf.set_font("Helvetica", "", 10)
-    pdf.set_text_color(204, 214, 246)
+    pdf.set_text_color(60, 60, 80)
     for source in RSS_FEEDS.keys():
-        pdf.cell(0, 5, f"  - {source}", ln=True)
+        pdf.cell(0, 5, _p(f"  - {source}"), ln=True)
     pdf.ln(3)
-    
+
     pdf.set_font("Helvetica", "B", 11)
-    pdf.set_text_color(100, 255, 218)
-    pdf.cell(0, 8, "Indicateurs techniques utilises:", ln=True)
+    pdf.set_text_color(0, 140, 100)
+    pdf.cell(0, 8, _p("Indicateurs techniques utilises:"), ln=True)
     pdf.set_font("Helvetica", "", 10)
-    pdf.set_text_color(204, 214, 246)
-    pdf.multi_cell(0, 6,
+    pdf.set_text_color(60, 60, 80)
+    pdf.multi_cell(0, 6, _p(
         "- EMA 9, EMA 21, SMA 50, SMA 200\n"
         "- RSI (14 periodes)\n"
         "- MACD (12, 26, 9)\n"
@@ -982,33 +1171,34 @@ def generate_pdf_report(market_data: dict, predictions_all: dict, fund_score: di
         "- ATR (Average True Range)\n"
         "- OBV (On-Balance Volume)\n"
         "- Volume SMA (20 periodes)"
-    )
+    ))
     pdf.ln(3)
-    
+
     pdf.set_font("Helvetica", "B", 11)
-    pdf.set_text_color(100, 255, 218)
-    pdf.cell(0, 8, "Methodologie de prediction:", ln=True)
+    pdf.set_text_color(0, 140, 100)
+    pdf.cell(0, 8, _p("Methodologie de prediction:"), ln=True)
     pdf.set_font("Helvetica", "", 10)
-    pdf.set_text_color(204, 214, 246)
-    pdf.multi_cell(0, 6,
+    pdf.set_text_color(60, 60, 80)
+    pdf.multi_cell(0, 6, _p(
         "- Scoring technique: 8 indicateurs ponderes (RSI, MACD, EMA, BB, Stoch, Volume, Momentum)\n"
         "- Scoring fondamental: 20 indicateurs macro + analyse NLP des actualites (TextBlob)\n"
-        "- Ponderation: CT (5min/15min) = 80% tech + 20% macro\n"
+        "- Ponderation CT (5min/15min) = 80% tech + 20% macro\n"
         "  MT (60min) = 65% tech + 35% macro | LT (240min) = 50/50\n"
         "- Analyse de sentiment: polarite et subjectivite des titres d'articles\n"
         "AVERTISSEMENT: Ces predictions sont a des fins educatives uniquement."
-    )
-    
+    ))
+
     pdf.set_font("Helvetica", "I", 8)
     pdf.set_text_color(100, 100, 100)
     pdf.ln(10)
-    pdf.multi_cell(0, 5,
+    pdf.multi_cell(0, 5, _p(
         "AVERTISSEMENT LEGAL: Ce rapport est genere automatiquement a des fins informatives et educatives "
         "uniquement. Il ne constitue pas un conseil financier. Les marches financiers sont risques. "
         "Consultez un conseiller financier avant toute decision d'investissement."
-    )
-    
+    ))
+
     return bytes(pdf.output())
+
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1022,115 +1212,103 @@ def main():
         <p>Analyse multi-facteurs • Prédictions probabilistes • NASDAQ • S&P500 • Or • CAC40 • Euronext600 • Pétrole</p>
     </div>
     """, unsafe_allow_html=True)
-    
+
     # ── Sidebar ──
     with st.sidebar:
         st.markdown('<div class="section-title">⚙️ Paramètres</div>', unsafe_allow_html=True)
-        
+
         selected_market = st.selectbox(
             "📊 Marché principal",
             options=list(MARKETS.keys()),
         )
-        
+
         selected_interval = st.selectbox(
             "⏱️ Intervalle graphique",
             options=list(TIMEFRAMES.keys()),
         )
-        
+
         st.markdown("---")
         st.markdown('<div class="section-title">🔄 Actualisation</div>', unsafe_allow_html=True)
-        
+
         auto_refresh = st.checkbox("Auto-refresh (5 min)", value=False)
-        
+
         if st.button("🔄 Rafraîchir maintenant", use_container_width=True, type="primary"):
             st.cache_data.clear()
             st.rerun()
-        
+
         last_update = datetime.now(pytz.timezone("Europe/Paris")).strftime("%H:%M:%S")
         st.markdown(f'<div class="update-time">⏰ Mis à jour: {last_update}</div>', unsafe_allow_html=True)
-        
+
         st.markdown("---")
         st.markdown('<div class="section-title">📰 Sources actives</div>', unsafe_allow_html=True)
         for src in RSS_FEEDS:
             st.markdown(f'<span class="source-badge">{src}</span>', unsafe_allow_html=True)
-        
+
         st.markdown("---")
         st.markdown('<div class="section-title">📡 Données</div>', unsafe_allow_html=True)
         st.markdown('<span class="source-badge">Yahoo Finance</span> <span class="source-badge">yfinance API</span>', unsafe_allow_html=True)
         st.markdown('<span class="source-badge">RSS Feeds</span> <span class="source-badge">TextBlob NLP</span>', unsafe_allow_html=True)
-        
+
         st.markdown("---")
         st.warning("⚠️ Application éducative uniquement. Pas de conseil financier.")
-    
-    # Auto-refresh
+
     if auto_refresh:
         time.sleep(300)
         st.rerun()
-    
+
     # ── Load data ──
     with st.spinner("🔄 Chargement des données en cours..."):
         news_articles = fetch_news_sentiment()
         fund_data = compute_fundamental_score(news_articles)
-        
-        # Fetch all markets
+
         all_market_prices = {}
         all_predictions = {}
-        
+
         for mkt_name, mkt_info in MARKETS.items():
-            ticker = mkt_info["ticker"]
+            ticker  = mkt_info["ticker"]
             tf_info = TIMEFRAMES[selected_interval]
-            df = fetch_ohlc(ticker, tf_info["yf_period"], tf_info["yf_interval"])
+            df      = fetch_ohlc(ticker, tf_info["yf_period"], tf_info["yf_interval"])
             price_info = get_current_price(ticker)
             all_market_prices[mkt_name] = {"df": df, "price_info": price_info}
-            
+
             tech = compute_technical_signal(df)
             preds = {}
             for tf_name, tf_data in TIMEFRAMES.items():
                 preds[tf_name] = predict_direction(tech["score"], fund_data["combined"], tf_data["minutes"])
             all_predictions[mkt_name] = preds
-    
+
     # ── Main tabs ──
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📊 Dashboard", 
-        "📈 Graphiques OHLC", 
-        "🌍 Macro & Sentiment", 
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "📊 Dashboard",
+        "📈 Graphiques OHLC",
+        "🌍 Macro & Sentiment",
         "📰 Actualités",
-        "📋 Sources"
+        "🎯 Conseils Scalping",
+        "📋 Sources",
     ])
-    
+
     # ══════════════════════════════════════════════
     # TAB 1: DASHBOARD
     # ══════════════════════════════════════════════
     with tab1:
         st.markdown('<div class="section-title">🏦 Vue d\'ensemble des marchés</div>', unsafe_allow_html=True)
-        
-        # Market overview cards
+
         cols = st.columns(len(MARKETS))
         for i, (mkt_name, mkt_info) in enumerate(MARKETS.items()):
             with cols[i]:
                 price_info = all_market_prices[mkt_name]["price_info"]
-                preds = all_predictions[mkt_name]
-                
-                # Short-term prediction
-                pred_5m = preds.get("5 min", {})
-                direction = pred_5m.get("direction", "N/A")
-                score = pred_5m.get("score", 50)
-                
-                if direction == "HAUSSIER":
-                    delta_class = "metric-delta-up"
-                    dir_icon = "▲"
-                elif direction == "BAISSIER":
-                    delta_class = "metric-delta-down"
-                    dir_icon = "▼"
-                else:
-                    delta_class = ""
-                    dir_icon = "▶"
-                
-                price = price_info.get("price", 0)
-                chg_pct = price_info.get("change_pct", 0)
+                preds      = all_predictions[mkt_name]
+                pred_5m    = preds.get("5 min", {})
+                direction  = pred_5m.get("direction", "N/A")
+                score      = pred_5m.get("score", 50)
+
+                dir_icon  = "▲" if direction == "HAUSSIER" else "▼" if direction == "BAISSIER" else "▶"
+                price     = price_info.get("price", 0)
+                chg_pct   = price_info.get("change_pct", 0)
                 chg_class = "metric-delta-up" if chg_pct >= 0 else "metric-delta-down"
-                chg_sign = "+" if chg_pct >= 0 else ""
-                
+                chg_sign  = "+" if chg_pct >= 0 else ""
+                sig_class = "signal-bull" if direction == "HAUSSIER" else "signal-bear" if direction == "BAISSIER" else "signal-neutral"
+
                 st.markdown(f"""
                 <div class="metric-card">
                     <div style="font-size:1.5em">{mkt_info['icon']}</div>
@@ -1138,61 +1316,50 @@ def main():
                     <div class="metric-value">{f"{price:,.2f}" if price else "—"}</div>
                     <div class="{chg_class}">{chg_sign}{chg_pct:.2f}%</div>
                     <div style="margin-top:8px">
-                        <span class="{'signal-bull' if direction=='HAUSSIER' else 'signal-bear' if direction=='BAISSIER' else 'signal-neutral'}">{dir_icon} {direction}</span>
+                        <span class="{sig_class}">{dir_icon} {direction}</span>
                     </div>
                     <div style="color:#8892b0; font-size:0.75em; margin-top:5px">Score: {score:.0f}/100</div>
                 </div>
                 """, unsafe_allow_html=True)
-        
+
         st.markdown("<br>", unsafe_allow_html=True)
-        
-        # Global sentiment gauges
+
         st.markdown('<div class="section-title">🎯 Sentiments globaux</div>', unsafe_allow_html=True)
-        
         col1, col2, col3, col4 = st.columns(4)
-        
         mkt_name = selected_market
         tech_sig = compute_technical_signal(all_market_prices[mkt_name]["df"])
-        
+
         with col1:
-            st.plotly_chart(make_sentiment_gauge(tech_sig["score"], f"Technique\n{mkt_name}"), 
-                           use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(make_sentiment_gauge(tech_sig["score"], f"Technique\n{mkt_name}"),
+                            use_container_width=True, config={"displayModeBar": False})
         with col2:
-            st.plotly_chart(make_sentiment_gauge(fund_data["eco_score"], "Score Macro-Éco"),
-                           use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(make_sentiment_gauge(fund_data["eco_score"], "Score Macro-Eco"),
+                            use_container_width=True, config={"displayModeBar": False})
         with col3:
             st.plotly_chart(make_sentiment_gauge(fund_data["news_score"], "Sentiment News"),
-                           use_container_width=True, config={"displayModeBar": False})
+                            use_container_width=True, config={"displayModeBar": False})
         with col4:
-            combined = fund_data["combined"] * 0.5 + tech_sig["score"] * 0.5
-            st.plotly_chart(make_sentiment_gauge(combined, "Score Global"),
-                           use_container_width=True, config={"displayModeBar": False})
-        
-        # Predictions table
+            combined_score = fund_data["combined"] * 0.5 + tech_sig["score"] * 0.5
+            st.plotly_chart(make_sentiment_gauge(combined_score, "Score Global"),
+                            use_container_width=True, config={"displayModeBar": False})
+
         st.markdown('<div class="section-title">🔮 Prédictions par marché & horizon</div>', unsafe_allow_html=True)
-        
         rows = []
-        for mkt_name, preds in all_predictions.items():
-            row = {"Marché": f"{MARKETS[mkt_name]['icon']} {mkt_name}"}
-            for tf, pred in preds.items():
-                d = pred["direction"]
-                b = pred["bull_prob"]
+        for mkt_name2, preds2 in all_predictions.items():
+            row = {"Marché": f"{MARKETS[mkt_name2]['icon']} {mkt_name2}"}
+            for tf, pred in preds2.items():
+                d  = pred["direction"]
+                b  = pred["bull_prob"]
                 be = pred["bear_prob"]
                 emoji = "📈" if d == "HAUSSIER" else "📉" if d == "BAISSIER" else "➡️"
                 row[tf] = f"{emoji} {d} ({b}%↑ / {be}%↓)"
             rows.append(row)
-        
         df_preds = pd.DataFrame(rows).set_index("Marché")
         st.dataframe(df_preds, use_container_width=True)
-        
-        # Probability chart for selected market
+
         st.markdown(f'<div class="section-title">📊 Probabilités — {selected_market}</div>', unsafe_allow_html=True)
-        st.plotly_chart(
-            make_probability_chart(all_predictions[selected_market]),
-            use_container_width=True
-        )
-        
-        # Technical signals for selected market
+        st.plotly_chart(make_probability_chart(all_predictions[selected_market]), use_container_width=True)
+
         st.markdown(f'<div class="section-title">⚡ Signaux techniques — {selected_market}</div>', unsafe_allow_html=True)
         signals = tech_sig.get("signals", [])
         if signals:
@@ -1200,69 +1367,59 @@ def main():
             for i, sig in enumerate(signals):
                 with sig_cols[i % 2]:
                     bull_bear = "🟢" if "BULL" in sig["signal"] else "🔴" if "BEAR" in sig["signal"] else "⚪"
+                    item_class = "news-positive" if "BULL" in sig["signal"] else "news-negative" if "BEAR" in sig["signal"] else "news-neutral"
                     st.markdown(f"""
-                    <div class="news-item {'news-positive' if 'BULL' in sig['signal'] else 'news-negative' if 'BEAR' in sig['signal'] else 'news-neutral'}">
+                    <div class="news-item {item_class}">
                         <div class="news-title">{bull_bear} <b>{sig['name']}</b> — {sig['value']}</div>
                         <div class="news-meta">{sig['signal']} | Poids: {sig['weight']}</div>
                     </div>
                     """, unsafe_allow_html=True)
-    
+
     # ══════════════════════════════════════════════
     # TAB 2: OHLC CHARTS
     # ══════════════════════════════════════════════
     with tab2:
         st.markdown(f'<div class="section-title">📈 Graphique OHLC — {selected_market} ({selected_interval})</div>', unsafe_allow_html=True)
-        
         df_main = all_market_prices[selected_market]["df"]
-        
         if not df_main.empty:
             fig_main = make_candlestick_chart(df_main, selected_market, MARKETS[selected_market]["color"])
             st.plotly_chart(fig_main, use_container_width=True)
         else:
             st.error(f"Données indisponibles pour {selected_market}")
-        
-        # All markets mini charts
+
         st.markdown('<div class="section-title">📊 Tous les marchés</div>', unsafe_allow_html=True)
-        
         cols_charts = st.columns(2)
-        for i, (mkt_name, mkt_info) in enumerate(MARKETS.items()):
-            if mkt_name == selected_market:
+        ci = 0
+        for mkt_name3, mkt_info3 in MARKETS.items():
+            if mkt_name3 == selected_market:
                 continue
-            df_mkt = all_market_prices[mkt_name]["df"]
-            with cols_charts[i % 2]:
+            df_mkt = all_market_prices[mkt_name3]["df"]
+            with cols_charts[ci % 2]:
                 if not df_mkt.empty:
                     fig_mini = go.Figure(go.Candlestick(
                         x=df_mkt.index[-50:],
-                        open=df_mkt["Open"].iloc[-50:],
-                        high=df_mkt["High"].iloc[-50:],
-                        low=df_mkt["Low"].iloc[-50:],
-                        close=df_mkt["Close"].iloc[-50:],
+                        open=df_mkt["Open"].iloc[-50:], high=df_mkt["High"].iloc[-50:],
+                        low=df_mkt["Low"].iloc[-50:],   close=df_mkt["Close"].iloc[-50:],
                         increasing_fillcolor="#10b981", increasing_line_color="#10b981",
                         decreasing_fillcolor="#ef4444", decreasing_line_color="#ef4444",
                     ))
                     fig_mini.update_layout(
-                        template="plotly_dark",
-                        paper_bgcolor="#0e1117",
-                        plot_bgcolor="#0e1117",
-                        title=f"{mkt_info['icon']} {mkt_name}",
-                        height=280,
-                        xaxis_rangeslider_visible=False,
-                        showlegend=False,
-                        margin=dict(t=40, b=20, l=20, r=20),
-                        font=dict(color="#8892b0"),
+                        template="plotly_dark", paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                        title=f"{mkt_info3['icon']} {mkt_name3}", height=280,
+                        xaxis_rangeslider_visible=False, showlegend=False,
+                        margin=dict(t=40, b=20, l=20, r=20), font=dict(color="#8892b0"),
                     )
                     st.plotly_chart(fig_mini, use_container_width=True)
-    
+            ci += 1
+
     # ══════════════════════════════════════════════
     # TAB 3: MACRO & SENTIMENT
     # ══════════════════════════════════════════════
     with tab3:
         st.markdown('<div class="section-title">🌍 Indicateurs économiques & géopolitiques</div>', unsafe_allow_html=True)
-        
         st.plotly_chart(make_eco_indicators_chart(), use_container_width=True)
-        
+
         st.markdown('<div class="section-title">📊 Détail des 20 indicateurs</div>', unsafe_allow_html=True)
-        
         eco_rows = []
         for name, data in ECONOMIC_INDICATORS.items():
             eco_rows.append({
@@ -1273,106 +1430,334 @@ def main():
                 "Poids": f"{data['weight']*100:.0f}%",
             })
         df_eco = pd.DataFrame(eco_rows)
-        
+
         def color_impact(val):
-            if val == "POSITIF":
-                return "color: #10b981"
-            elif val == "NÉGATIF":
-                return "color: #ef4444"
+            if val == "POSITIF":   return "color: #10b981"
+            elif val == "NEGATIF" or val == "NÉGATIF": return "color: #ef4444"
             return "color: #3b82f6"
-        
+
         st.dataframe(df_eco.style.applymap(color_impact, subset=["Impact"]), use_container_width=True)
-        
-        # News sentiment breakdown
-        st.markdown('<div class="section-title">📊 Répartition du sentiment des actualités</div>', unsafe_allow_html=True)
-        
+
+        st.markdown('<div class="section-title">📊 Répartition du sentiment</div>', unsafe_allow_html=True)
         col_pie1, col_pie2 = st.columns(2)
         with col_pie1:
             fig_pie = go.Figure(go.Pie(
-                labels=["Positif 📈", "Négatif 📉", "Neutre ➡️"],
+                labels=["Positif", "Negatif", "Neutre"],
                 values=[fund_data["news_bull"], fund_data["news_bear"], fund_data["news_neutral"]],
-                hole=0.5,
-                marker=dict(colors=["#10b981", "#ef4444", "#3b82f6"]),
+                hole=0.5, marker=dict(colors=["#10b981", "#ef4444", "#3b82f6"]),
             ))
-            fig_pie.update_layout(
-                template="plotly_dark",
-                paper_bgcolor="#0e1117",
-                title="Sentiment des actualités",
-                font=dict(color="#8892b0"),
-                height=300,
-            )
+            fig_pie.update_layout(template="plotly_dark", paper_bgcolor="#0e1117",
+                title="Sentiment actualites", font=dict(color="#8892b0"), height=300)
             st.plotly_chart(fig_pie, use_container_width=True)
-        
         with col_pie2:
-            # Impact breakdown
-            pos_count = sum(1 for d in ECONOMIC_INDICATORS.values() if d["impact"] == "positif")
-            neg_count = sum(1 for d in ECONOMIC_INDICATORS.values() if d["impact"] == "négatif")
-            neu_count = sum(1 for d in ECONOMIC_INDICATORS.values() if d["impact"] == "neutre")
-            
+            pos_c = sum(1 for d in ECONOMIC_INDICATORS.values() if d["impact"] == "positif")
+            neg_c = sum(1 for d in ECONOMIC_INDICATORS.values() if d["impact"] in ("négatif","negatif"))
+            neu_c = sum(1 for d in ECONOMIC_INDICATORS.values() if d["impact"] == "neutre")
             fig_pie2 = go.Figure(go.Pie(
-                labels=["Positif 📈", "Négatif 📉", "Neutre ➡️"],
-                values=[pos_count, neg_count, neu_count],
-                hole=0.5,
-                marker=dict(colors=["#10b981", "#ef4444", "#3b82f6"]),
+                labels=["Positif", "Negatif", "Neutre"],
+                values=[pos_c, neg_c, neu_c],
+                hole=0.5, marker=dict(colors=["#10b981", "#ef4444", "#3b82f6"]),
             ))
-            fig_pie2.update_layout(
-                template="plotly_dark",
-                paper_bgcolor="#0e1117",
-                title="Impact des indicateurs macro",
-                font=dict(color="#8892b0"),
-                height=300,
-            )
+            fig_pie2.update_layout(template="plotly_dark", paper_bgcolor="#0e1117",
+                title="Impact indicateurs macro", font=dict(color="#8892b0"), height=300)
             st.plotly_chart(fig_pie2, use_container_width=True)
-    
+
     # ══════════════════════════════════════════════
     # TAB 4: NEWS
     # ══════════════════════════════════════════════
     with tab4:
         st.markdown('<div class="section-title">📰 Actualités financières & géopolitiques</div>', unsafe_allow_html=True)
-        
         col_f1, col_f2 = st.columns([1, 3])
         with col_f1:
-            filter_sentiment = st.selectbox("Filtrer par sentiment:", ["Tous", "positif", "négatif", "neutre"])
+            filter_sentiment = st.selectbox("Filtrer:", ["Tous", "positif", "négatif", "neutre"])
         with col_f2:
-            search_query = st.text_input("🔍 Rechercher dans les titres:", placeholder="inflation, Fed, géopolitique...")
-        
+            search_query = st.text_input("🔍 Rechercher:", placeholder="inflation, Fed, geopolitique...")
+
         filtered_news = news_articles
         if filter_sentiment != "Tous":
             filtered_news = [a for a in filtered_news if a["sentiment"] == filter_sentiment]
         if search_query:
             filtered_news = [a for a in filtered_news if search_query.lower() in a["title"].lower()]
-        
+
         st.markdown(f"**{len(filtered_news)} articles** analysés")
-        
+
         for article in filtered_news[:50]:
-            polarity = article["polarity"]
+            polarity  = article["polarity"]
             sentiment = article["sentiment"]
-            css_class = f"news-{sentiment if sentiment in ['positif', 'négatif'] else 'neutral'}"
-            icon = "📈" if sentiment == "positif" else "📉" if sentiment == "négatif" else "➡️"
-            
+            css_class = f"news-{'positive' if sentiment=='positif' else 'negative' if sentiment=='négatif' else 'neutral'}"
+            icon      = "📈" if sentiment == "positif" else "📉" if sentiment == "négatif" else "➡️"
             st.markdown(f"""
             <div class="news-item {css_class}">
                 <div class="news-title">{icon} <b>{article['title']}</b></div>
                 <div class="news-meta">
-                    📡 {article['source']} &nbsp;|&nbsp; 
-                    🕒 {article['published']} &nbsp;|&nbsp; 
+                    📡 {article['source']} &nbsp;|&nbsp;
+                    🕒 {article['published']} &nbsp;|&nbsp;
                     Polarité: {polarity:+.3f} &nbsp;|&nbsp;
                     Sentiment: <b>{sentiment.upper()}</b>
                 </div>
             </div>
             """, unsafe_allow_html=True)
-        
         if not filtered_news:
-            st.info("Aucun article trouvé avec ces filtres.")
-    
+            st.info("Aucun article trouvé.")
+
     # ══════════════════════════════════════════════
-    # TAB 5: SOURCES
+    # TAB 5: CONSEILS SCALPING  ← NEW
     # ══════════════════════════════════════════════
     with tab5:
+        st.markdown('<div class="section-title">🎯 Conseils Scalping — Niveaux d\'entrée & sortie</div>', unsafe_allow_html=True)
+
+        st.warning("⚠️ Ces conseils sont générés algorithmiquement à titre éducatif. Ne constituent pas un conseil financier.")
+
+        # ── Sélecteurs ──
+        col_sel1, col_sel2, col_sel3 = st.columns(3)
+        with col_sel1:
+            scalp_market = st.selectbox(
+                "📊 Actif à analyser",
+                options=list(MARKETS.keys()),
+                key="scalp_market"
+            )
+        with col_sel2:
+            scalp_tf = st.selectbox(
+                "⏱️ Horizon de trade",
+                options=list(TIMEFRAMES.keys()),
+                key="scalp_tf"
+            )
+        with col_sel3:
+            trade_size = st.number_input(
+                "💵 Taille du trade ($)",
+                min_value=10.0, max_value=100000.0,
+                value=100.0, step=10.0,
+                key="trade_size"
+            )
+
+        # ── Compute ──
+        scalp_pred = all_predictions[scalp_market].get(scalp_tf, {})
+        scalp_df   = all_market_prices[scalp_market]["df"]
+        advice     = compute_scalp_advice(scalp_df, scalp_pred, scalp_market, scalp_tf, trade_size)
+
+        if not advice:
+            st.error("Données insuffisantes pour générer des conseils.")
+        else:
+            cp    = advice["current_price"]
+            minfo = MARKETS[scalp_market]
+
+            # ── Main advice banner ──
+            st.markdown(f"""
+            <div style="background: linear-gradient(135deg, #1a1f2e, #16213e);
+                        border: 2px solid {advice['advice_color']};
+                        border-radius: 12px; padding: 20px; text-align: center; margin: 10px 0;">
+                <div style="font-size: 2em;">{advice['advice_icon']}</div>
+                <div style="color: {advice['advice_color']}; font-size: 1.6em; font-weight: bold;">
+                    {advice['main_advice']}
+                </div>
+                <div style="color: #8892b0; font-size: 0.9em; margin-top: 8px;">
+                    {minfo['icon']} <b>{scalp_market}</b> &nbsp;|&nbsp;
+                    Prix actuel: <b style="color:#ccd6f6">{cp:,.4f}</b> &nbsp;|&nbsp;
+                    ATR: <b style="color:#fbbf24">{advice['atr']:.4f}</b> &nbsp;|&nbsp;
+                    RSI: <b style="color:#a78bfa">{advice['rsi']:.1f}</b> &nbsp;|&nbsp;
+                    Horizon: <b style="color:#00d4ff">{scalp_tf}</b>
+                </div>
+                <div style="margin-top: 10px;">
+                    <span style="color:#10b981; font-size:1.1em;">📈 Hausse: <b>{advice['bull_prob']}%</b></span>
+                    &nbsp;&nbsp;&nbsp;
+                    <span style="color:#ef4444; font-size:1.1em;">📉 Baisse: <b>{advice['bear_prob']}%</b></span>
+                    &nbsp;&nbsp;&nbsp;
+                    <span style="color:#fbbf24; font-size:1.1em;">🎯 Confiance: <b>{advice['confidence']}%</b></span>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # ── Two columns: LONG / SHORT ──
+            col_long, col_short = st.columns(2)
+
+            # ─── LONG ───
+            with col_long:
+                st.markdown("""
+                <div style="background: linear-gradient(135deg, #064e3b, #065f46);
+                            border: 1px solid #10b981; border-radius: 10px;
+                            padding: 16px; margin-bottom: 10px; text-align:center;">
+                    <div style="color:#6ee7b7; font-size:1.3em; font-weight:bold;">📈 POSITION LONGUE (ACHAT)</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                def lvl_card(label, value, color, note=""):
+                    return f"""
+                    <div style="background:#1a1f2e; border-left: 4px solid {color};
+                                padding: 10px 14px; margin: 6px 0; border-radius: 0 8px 8px 0;">
+                        <div style="color:#8892b0; font-size:0.78em; text-transform:uppercase;">{label}</div>
+                        <div style="color:{color}; font-size:1.3em; font-weight:bold;">{value}</div>
+                        {"<div style='color:#8892b0;font-size:0.75em;'>"+note+"</div>" if note else ""}
+                    </div>"""
+
+                st.markdown(lvl_card("🟢 Entrée Long", f"{advice['entry_long']:,.4f}", "#10b981", "Légèrement au-dessus du prix actuel"), unsafe_allow_html=True)
+                st.markdown(lvl_card("🔴 Stop Loss",   f"{advice['sl_long']:,.4f}",    "#ef4444", f"Risque: -{advice['loss_long']:.2f}$ sur {trade_size:.0f}$"), unsafe_allow_html=True)
+                st.markdown(lvl_card("🎯 TP1 (50%)",   f"{advice['tp1_long']:,.4f}",   "#fbbf24", f"Gain estimé: +{advice['gain_long']:.2f}$"), unsafe_allow_html=True)
+                st.markdown(lvl_card("🎯 TP2 (30%)",   f"{advice['tp2_long']:,.4f}",   "#f59e0b"), unsafe_allow_html=True)
+                if advice["tp3_long"]:
+                    st.markdown(lvl_card("🎯 TP3 (20%)", f"{advice['tp3_long']:,.4f}", "#d97706"), unsafe_allow_html=True)
+
+                # R:R and proba
+                rr_color = "#10b981" if advice["rr_long"] >= 1.5 else "#fbbf24" if advice["rr_long"] >= 1.0 else "#ef4444"
+                st.markdown(f"""
+                <div style="background:#16213e; border:1px solid #1e3a5f; border-radius:8px;
+                            padding:12px; margin-top:10px; text-align:center;">
+                    <span style="color:#8892b0; font-size:0.85em;">Ratio R:R &nbsp;</span>
+                    <span style="color:{rr_color}; font-size:1.4em; font-weight:bold;">1:{advice['rr_long']}</span>
+                    &nbsp;&nbsp;
+                    <span style="color:#8892b0; font-size:0.85em;">Prob. gain &nbsp;</span>
+                    <span style="color:#10b981; font-size:1.4em; font-weight:bold;">{advice['prob_gain_long']}%</span>
+                </div>
+                """, unsafe_allow_html=True)
+
+                # P&L bar
+                fig_long_pnl = go.Figure()
+                fig_long_pnl.add_trace(go.Bar(
+                    x=["Gain potentiel", "Perte potentielle"],
+                    y=[advice["gain_long"], -advice["loss_long"]],
+                    marker_color=["#10b981", "#ef4444"],
+                    text=[f"+${advice['gain_long']:.2f}", f"-${advice['loss_long']:.2f}"],
+                    textposition="outside",
+                ))
+                fig_long_pnl.update_layout(
+                    template="plotly_dark", paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                    title=f"P&L Long sur ${trade_size:.0f}", height=220,
+                    font=dict(color="#8892b0", size=11), margin=dict(t=40, b=20, l=10, r=10),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_long_pnl, use_container_width=True, config={"displayModeBar": False})
+
+            # ─── SHORT ───
+            with col_short:
+                st.markdown("""
+                <div style="background: linear-gradient(135deg, #7f1d1d, #991b1b);
+                            border: 1px solid #ef4444; border-radius: 10px;
+                            padding: 16px; margin-bottom: 10px; text-align:center;">
+                    <div style="color:#fca5a5; font-size:1.3em; font-weight:bold;">📉 POSITION COURTE (VENTE)</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                st.markdown(lvl_card("🔴 Entrée Short", f"{advice['entry_short']:,.4f}", "#ef4444", "Légèrement en dessous du prix actuel"), unsafe_allow_html=True)
+                st.markdown(lvl_card("🟢 Stop Loss",    f"{advice['sl_short']:,.4f}",    "#10b981", f"Risque: -{advice['loss_short']:.2f}$ sur {trade_size:.0f}$"), unsafe_allow_html=True)
+                st.markdown(lvl_card("🎯 TP1 (50%)",    f"{advice['tp1_short']:,.4f}",   "#fbbf24", f"Gain estimé: +{advice['gain_short']:.2f}$"), unsafe_allow_html=True)
+                st.markdown(lvl_card("🎯 TP2 (30%)",    f"{advice['tp2_short']:,.4f}",   "#f59e0b"), unsafe_allow_html=True)
+                if advice["tp3_short"]:
+                    st.markdown(lvl_card("🎯 TP3 (20%)", f"{advice['tp3_short']:,.4f}", "#d97706"), unsafe_allow_html=True)
+
+                rr_color_s = "#10b981" if advice["rr_short"] >= 1.5 else "#fbbf24" if advice["rr_short"] >= 1.0 else "#ef4444"
+                st.markdown(f"""
+                <div style="background:#16213e; border:1px solid #1e3a5f; border-radius:8px;
+                            padding:12px; margin-top:10px; text-align:center;">
+                    <span style="color:#8892b0; font-size:0.85em;">Ratio R:R &nbsp;</span>
+                    <span style="color:{rr_color_s}; font-size:1.4em; font-weight:bold;">1:{advice['rr_short']}</span>
+                    &nbsp;&nbsp;
+                    <span style="color:#8892b0; font-size:0.85em;">Prob. gain &nbsp;</span>
+                    <span style="color:#ef4444; font-size:1.4em; font-weight:bold;">{advice['prob_gain_short']}%</span>
+                </div>
+                """, unsafe_allow_html=True)
+
+                fig_short_pnl = go.Figure()
+                fig_short_pnl.add_trace(go.Bar(
+                    x=["Gain potentiel", "Perte potentielle"],
+                    y=[advice["gain_short"], -advice["loss_short"]],
+                    marker_color=["#10b981", "#ef4444"],
+                    text=[f"+${advice['gain_short']:.2f}", f"-${advice['loss_short']:.2f}"],
+                    textposition="outside",
+                ))
+                fig_short_pnl.update_layout(
+                    template="plotly_dark", paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                    title=f"P&L Short sur ${trade_size:.0f}", height=220,
+                    font=dict(color="#8892b0", size=11), margin=dict(t=40, b=20, l=10, r=10),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_short_pnl, use_container_width=True, config={"displayModeBar": False})
+
+            # ── Key levels summary ──
+            st.markdown('<div class="section-title">📐 Niveaux clés de référence</div>', unsafe_allow_html=True)
+            col_lv1, col_lv2, col_lv3, col_lv4 = st.columns(4)
+            with col_lv1:
+                st.markdown(f"""<div class="metric-card">
+                    <div class="metric-label">Bollinger Upper</div>
+                    <div class="metric-value" style="color:#fbbf24">{advice['bb_upper']:,.4f}</div>
+                    <div style="color:#8892b0;font-size:0.8em">Résistance dynamique</div>
+                </div>""", unsafe_allow_html=True)
+            with col_lv2:
+                st.markdown(f"""<div class="metric-card">
+                    <div class="metric-label">Bollinger Lower</div>
+                    <div class="metric-value" style="color:#fbbf24">{advice['bb_lower']:,.4f}</div>
+                    <div style="color:#8892b0;font-size:0.8em">Support dynamique</div>
+                </div>""", unsafe_allow_html=True)
+            with col_lv3:
+                ema_color = "#10b981" if cp > advice['ema9'] else "#ef4444"
+                st.markdown(f"""<div class="metric-card">
+                    <div class="metric-label">EMA 9</div>
+                    <div class="metric-value" style="color:{ema_color}">{advice['ema9']:,.4f}</div>
+                    <div style="color:#8892b0;font-size:0.8em">{"Prix > EMA9 ✅" if cp > advice['ema9'] else "Prix < EMA9 ⚠️"}</div>
+                </div>""", unsafe_allow_html=True)
+            with col_lv4:
+                ema21_color = "#10b981" if cp > advice['ema21'] else "#ef4444"
+                st.markdown(f"""<div class="metric-card">
+                    <div class="metric-label">EMA 21</div>
+                    <div class="metric-value" style="color:{ema21_color}">{advice['ema21']:,.4f}</div>
+                    <div style="color:#8892b0;font-size:0.8em">{"Prix > EMA21 ✅" if cp > advice['ema21'] else "Prix < EMA21 ⚠️"}</div>
+                </div>""", unsafe_allow_html=True)
+
+            # ── Multi-timeframe summary for this asset ──
+            st.markdown(f'<div class="section-title">🔭 Vue multi-timeframe — {scalp_market}</div>', unsafe_allow_html=True)
+            tf_rows = []
+            for tf_name_loop in TIMEFRAMES.keys():
+                p = all_predictions[scalp_market].get(tf_name_loop, {})
+                adv = compute_scalp_advice(scalp_df, p, scalp_market, tf_name_loop, trade_size)
+                if adv:
+                    tf_rows.append({
+                        "Horizon":       tf_name_loop,
+                        "Direction":     p.get("direction","—"),
+                        "Prob. Hausse":  f"{p.get('bull_prob',50)}%",
+                        "Prob. Baisse":  f"{p.get('bear_prob',50)}%",
+                        "Confiance":     f"{p.get('confidence',0):.0f}%",
+                        "Conseil":       adv.get("main_advice","—"),
+                        "Entry Long":    f"{adv.get('entry_long',0):,.4f}",
+                        "SL Long":       f"{adv.get('sl_long',0):,.4f}",
+                        "TP1 Long":      f"{adv.get('tp1_long',0):,.4f}",
+                        "R:R Long":      f"1:{adv.get('rr_long',0)}",
+                        "P.Gain Long":   f"{adv.get('prob_gain_long',0)}%",
+                        f"Gain+${trade_size:.0f}": f"+${adv.get('gain_long',0):.2f}",
+                    })
+            if tf_rows:
+                st.dataframe(pd.DataFrame(tf_rows).set_index("Horizon"), use_container_width=True)
+
+            # ── All markets quick summary ──
+            st.markdown('<div class="section-title">🌐 Conseils rapides — Tous les actifs</div>', unsafe_allow_html=True)
+            mkt_cols = st.columns(3)
+            for mi, (mn, minfo2) in enumerate(MARKETS.items()):
+                with mkt_cols[mi % 3]:
+                    p_quick = all_predictions[mn].get(scalp_tf, {})
+                    adv_q   = compute_scalp_advice(all_market_prices[mn]["df"], p_quick, mn, scalp_tf, trade_size)
+                    if adv_q:
+                        ac = adv_q["advice_color"]
+                        st.markdown(f"""
+                        <div style="background:#1a1f2e; border:1px solid {ac};
+                                    border-radius:10px; padding:12px; margin:6px 0; text-align:center;">
+                            <div style="font-size:1.3em">{minfo2['icon']}</div>
+                            <div style="color:#ccd6f6; font-weight:bold; font-size:0.95em">{mn}</div>
+                            <div style="color:{ac}; font-weight:bold; margin:4px 0">{adv_q['advice_icon']} {adv_q['main_advice']}</div>
+                            <div style="color:#8892b0; font-size:0.78em">
+                                Prix: <b style="color:#ccd6f6">{adv_q['current_price']:,.3f}</b><br>
+                                Entry Long: <b style="color:#10b981">{adv_q['entry_long']:,.3f}</b> &nbsp;
+                                SL: <b style="color:#ef4444">{adv_q['sl_long']:,.3f}</b><br>
+                                TP1: <b style="color:#fbbf24">{adv_q['tp1_long']:,.3f}</b> &nbsp;
+                                R:R <b style="color:#a78bfa">1:{adv_q['rr_long']}</b><br>
+                                Prob.gain: <span style="color:#10b981"><b>{adv_q['prob_gain_long']}%</b></span> &nbsp;
+                                Gain: <span style="color:#10b981"><b>+${adv_q['gain_long']:.2f}</b></span>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+    # ══════════════════════════════════════════════
+    # TAB 6: SOURCES
+    # ══════════════════════════════════════════════
+    with tab6:
         st.markdown('<div class="section-title">📋 Sources & Méthodologie</div>', unsafe_allow_html=True)
-        
         col_s1, col_s2 = st.columns(2)
-        
         with col_s1:
             st.markdown("#### 📡 Sources de données de marché")
             st.markdown("""
@@ -1380,64 +1765,55 @@ def main():
             |--------|------|-------------|
             | **Yahoo Finance** | OHLCV temps réel | 1-5 min |
             | **yfinance API** | Historical data | Temps réel |
-            | Tickers couverts | ^NDX, ^GSPC, GC=F, ^FCHI, ^STOXX, CL=F | — |
+            | Tickers | ^NDX, ^GSPC, GC=F, ^FCHI, ^STOXX, CL=F | — |
             """)
-            
             st.markdown("#### 📰 Flux RSS d'actualités")
             for src, url in RSS_FEEDS.items():
-                st.markdown(f"- **{src}** — `{url[:60]}...`")
-        
+                st.markdown(f"- **{src}** — `{url[:55]}...`")
         with col_s2:
-            st.markdown("#### 🔬 Indicateurs techniques utilisés")
+            st.markdown("#### 🔬 Indicateurs techniques")
             st.markdown("""
-            | Indicateur | Paramètres | Utilisation |
-            |-----------|-----------|-------------|
-            | EMA | 9, 21 périodes | Tendance CT |
-            | SMA | 50, 200 périodes | Tendance LT |
-            | RSI | 14 périodes | Surachat/survente |
+            | Indicateur | Paramètres | Usage |
+            |-----------|-----------|-------|
+            | EMA | 9, 21 | Tendance CT |
+            | SMA | 50, 200 | Tendance LT |
+            | RSI | 14 | Surachat/survente |
             | MACD | 12, 26, 9 | Momentum |
-            | Bollinger | 20p, 2σ | Volatilité |
+            | Bollinger | 20p, 2σ | Volatilité + niveaux |
             | Stochastique | 14, 3 | Retournements |
-            | ATR | 14 périodes | Volatilité |
-            | OBV | — | Pression volume |
-            | Volume SMA | 20 périodes | Confirmation |
+            | ATR | 14 | Volatilité + SL/TP |
+            | OBV | — | Volume |
             """)
-        
-        st.markdown("#### ⚖️ Pondérations par horizon")
-        st.markdown("""
-        | Horizon | Poids Technique | Poids Fondamental |
-        |---------|----------------|-------------------|
-        | **5 min** | 80% | 20% |
-        | **15 min** | 80% | 20% |
-        | **60 min** | 65% | 35% |
-        | **240 min** | 50% | 50% |
-        """)
-        
         st.markdown("#### 🌍 Indicateurs macro suivis (20 facteurs)")
         for name, data in ECONOMIC_INDICATORS.items():
-            icon = "🟢" if data["impact"] == "positif" else "🔴" if data["impact"] == "négatif" else "⚪"
-            st.markdown(f"- {icon} **{name}** — Valeur: `{data['value']}` {data['trend']} — Impact: *{data['impact']}* (poids: {data['weight']*100:.0f}%)")
-        
-        st.warning("⚠️ **Avertissement légal** : Cette application est fournie à des fins éducatives et informatives uniquement. Elle ne constitue pas un conseil en investissement financier. Les marchés financiers comportent des risques de pertes. Consultez un conseiller financier agréé avant toute décision d'investissement.")
-    
+            icon = "🟢" if data["impact"] == "positif" else "🔴" if data["impact"] in ("négatif","negatif") else "⚪"
+            trend_disp = data['trend']
+            st.markdown(f"- {icon} **{name}** — `{data['value']}` {trend_disp} — *{data['impact']}* (poids: {data['weight']*100:.0f}%)")
+        st.warning("⚠️ **Avertissement légal** : Application éducative uniquement. Pas de conseil financier.")
+
     # ── PDF Report ──
     st.markdown("---")
-    st.markdown('<div class="section-title">📄 Génération de rapport</div>', unsafe_allow_html=True)
-    
+    st.markdown('<div class="section-title">📄 Génération de rapport PDF</div>', unsafe_allow_html=True)
     col_pdf1, col_pdf2 = st.columns([2, 1])
     with col_pdf1:
-        st.markdown("Générez un rapport PDF complet incluant toutes les analyses, prédictions, indicateurs et sources.")
+        st.markdown("Rapport PDF complet : analyses, prédictions, conseils scalping, indicateurs et sources.")
     with col_pdf2:
         if st.button("📥 Générer rapport PDF", use_container_width=True, type="primary"):
             with st.spinner("Génération du rapport..."):
-                pdf_bytes = generate_pdf_report(all_market_prices, all_predictions, fund_data)
-                
-                b64 = base64.b64encode(pdf_bytes).decode()
-                filename = f"market_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-                
-                href = f'<a href="data:application/pdf;base64,{b64}" download="{filename}" style="background: linear-gradient(135deg, #0f3460, #00d4ff); color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold; display: inline-block; margin-top: 10px;">⬇️ Télécharger le rapport PDF</a>'
-                st.markdown(href, unsafe_allow_html=True)
-                st.success("✅ Rapport généré avec succès!")
+                try:
+                    pdf_bytes = generate_pdf_report(all_market_prices, all_predictions, fund_data)
+                    b64 = base64.b64encode(pdf_bytes).decode()
+                    filename = f"market_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+                    href = (
+                        f'<a href="data:application/pdf;base64,{b64}" download="{filename}" '
+                        f'style="background: linear-gradient(135deg, #0f3460, #00d4ff); color: white; '
+                        f'padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: bold; '
+                        f'display: inline-block; margin-top: 10px;">⬇️ Télécharger le rapport PDF</a>'
+                    )
+                    st.markdown(href, unsafe_allow_html=True)
+                    st.success("✅ Rapport généré avec succès!")
+                except Exception as e:
+                    st.error(f"Erreur PDF: {str(e)}")
 
 
 if __name__ == "__main__":
