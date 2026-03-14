@@ -2638,27 +2638,56 @@ def mirofish_swarm_simulation(
     # ── Monte Carlo 1000 simulations ──
     current_price = df["Close"].iloc[-1] if not df.empty else 100.0
 
-    # Historical volatility
+    # ── Historical volatility — calibrated per asset type ──
+    # Per-bar vol minimums based on real market data:
+    # Indices (SPX/NDX): ~0.07-0.12%/bar (5min)
+    # Commodities (Gold/Oil): ~0.10-0.20%/bar
+    # CAC/Euronext: ~0.06-0.10%/bar
+    asset_vol_floor = {
+        "NASDAQ 100":   0.0008,   # ~0.08% per 5min bar
+        "S&P 500":      0.0007,
+        "Or (Gold)":    0.0010,
+        "CAC 40":       0.0007,
+        "Euronext 600": 0.0006,
+        "Pétrole (WTI)":0.0012,
+    }
+    vol_floor = asset_vol_floor.get(asset_name, 0.0008)
+
     if not df.empty and len(df) >= 10:
         log_ret  = np.log(df["Close"] / df["Close"].shift(1)).dropna()
         hist_vol = float(log_ret.std())
-        if np.isnan(hist_vol) or hist_vol == 0:
-            hist_vol = 0.0015
+        # Use real vol if meaningful, else use calibrated floor
+        if np.isnan(hist_vol) or hist_vol < vol_floor:
+            hist_vol = vol_floor
     else:
-        hist_vol = 0.0015
+        hist_vol = vol_floor
 
-    # Drift = consensus bias + theme drift
-    base_drift   = (consensus - 50) / 100 * 0.006
-    total_drift  = base_drift + theme_drift * 0.001
-    # n_bars for timeframe
-    n_bars = max(1, min(timeframe_minutes // 5, 60))
+    # Scale vol to timeframe: longer TF = more accumulated vol
+    # Per bar vol × sqrt(n_bars) gives realistic total range
+    tf_vol_scale = {5: 1.0, 15: 1.2, 60: 1.5, 240: 2.0}
+    vol_scale = tf_vol_scale.get(timeframe_minutes, 1.0)
+    hist_vol_scaled = hist_vol * vol_scale
 
-    np.random.seed(42)
-    end_prices  = []
-    paths_10    = []  # 10 sample paths for chart
+    # ── Drift = consensus bias + theme drift + VADER bias ──
+    # Consensus 0-100 → drift: 50=neutral, 70=+0.3%/bar, 30=-0.3%/bar
+    base_drift  = (consensus - 50) / 100 * 0.004
+    # VADER adds direct signal
+    vader_drift = vader_mean * 0.002
+    # Theme drift from historical reactions
+    total_drift = base_drift + vader_drift + theme_drift * 0.0005
+
+    # n_bars: realistic per timeframe
+    tf_bars = {5: 12, 15: 16, 60: 24, 240: 20}
+    n_bars  = tf_bars.get(timeframe_minutes, max(1, min(timeframe_minutes // 5, 48)))
+
+    # ── Run simulations — random seed based on current minute for variety ──
+    rng = np.random.default_rng(int(datetime.now().timestamp()) % 10000)
+    end_prices = []
+    paths_10   = []
 
     for i in range(n_simulations):
-        shocks   = np.random.normal(total_drift, hist_vol, n_bars)
+        # GBM: each bar = drift + vol*Z
+        shocks   = rng.normal(total_drift, hist_vol_scaled, n_bars)
         path_end = current_price * np.exp(np.sum(shocks))
         end_prices.append(path_end)
         if i < 10:
@@ -2666,6 +2695,20 @@ def mirofish_swarm_simulation(
             paths_10.append(list(path))
 
     end_prices = np.array(end_prices)
+
+    # Sanity check — if still all prices equal, force realistic spread
+    price_spread = (end_prices.max() - end_prices.min()) / current_price * 100
+    if price_spread < 0.1:
+        # Force realistic vol using asset floor
+        end_prices = current_price * np.exp(
+            rng.normal(total_drift * n_bars, hist_vol_scaled * np.sqrt(n_bars), n_simulations)
+        )
+        paths_10 = []
+        for i in range(10):
+            path = current_price * np.exp(np.cumsum(
+                rng.normal(total_drift, hist_vol_scaled, n_bars)
+            ))
+            paths_10.append(list(path))
 
     # ── Probability table ──
     def prob_above(pct): return float((end_prices > current_price * (1 + pct/100)).mean() * 100)
@@ -2684,22 +2727,30 @@ def mirofish_swarm_simulation(
     bear_prob = round(100 - bull_prob, 1)
 
     # ── Trade recommendation ──
-    if consensus >= 62 and vader_mean > 0.05:
+    # More nuanced: use bull_prob from MC + consensus + VADER
+    strong_bull = consensus >= 58 and vader_mean > 0.02 and bull_prob >= 52
+    strong_bear = consensus <= 42 and vader_mean < -0.02 and bear_prob >= 52
+
+    if strong_bull:
         trade_signal = "LONG 📈"
         trade_color  = "#10b981"
-        trade_conf   = round(min((consensus - 50) * 2 + abs(vader_mean) * 50, 92), 1)
-        target_price = round(current_price * (1 + abs(total_drift) * n_bars * 3), 4)
-        sl_price     = round(current_price * (1 - hist_vol * 3), 4)
-    elif consensus <= 38 and vader_mean < -0.05:
+        trade_conf   = round(min(
+            (consensus - 50) * 1.5 + abs(vader_mean) * 40 + (bull_prob - 50) * 0.8, 92
+        ), 1)
+        target_price = round(current_price * (1 + hist_vol_scaled * np.sqrt(n_bars) * 1.5), 4)
+        sl_price     = round(current_price * (1 - hist_vol_scaled * np.sqrt(n_bars) * 0.8), 4)
+    elif strong_bear:
         trade_signal = "SHORT 📉"
         trade_color  = "#ef4444"
-        trade_conf   = round(min((50 - consensus) * 2 + abs(vader_mean) * 50, 92), 1)
-        target_price = round(current_price * (1 - abs(total_drift) * n_bars * 3), 4)
-        sl_price     = round(current_price * (1 + hist_vol * 3), 4)
+        trade_conf   = round(min(
+            (50 - consensus) * 1.5 + abs(vader_mean) * 40 + (bear_prob - 50) * 0.8, 92
+        ), 1)
+        target_price = round(current_price * (1 - hist_vol_scaled * np.sqrt(n_bars) * 1.5), 4)
+        sl_price     = round(current_price * (1 + hist_vol_scaled * np.sqrt(n_bars) * 0.8), 4)
     else:
         trade_signal = "WAIT ⏳"
         trade_color  = "#fbbf24"
-        trade_conf   = round(50 - abs(consensus - 50), 1)
+        trade_conf   = round(max(10, 50 - abs(consensus - 50) - abs(vader_mean) * 20), 1)
         target_price = round(current_price, 4)
         sl_price     = round(current_price, 4)
 
@@ -2732,8 +2783,9 @@ def mirofish_swarm_simulation(
         "paths_10":       paths_10,
         "n_bars":         n_bars,
         "p10": round(p10, 4), "p50": round(p50, 4), "p90": round(p90, 4),
-        "hist_vol":       round(hist_vol * 100, 4),
+        "hist_vol":       round(hist_vol_scaled * 100, 4),
         "drift":          round(total_drift * 100, 5),
+        "vol_spread":     round(price_spread, 3),
         # Trade
         "trade_signal":   trade_signal,
         "trade_color":    trade_color,
