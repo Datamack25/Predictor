@@ -196,6 +196,60 @@ RSS_FEEDS = {
     "ECB News":            "https://www.ecb.europa.eu/rss/press.html",
 }
 
+# ─────────────────────────────────────────────────────────────
+# TWITTER/X KEY ACCOUNTS  (scraped via Nitter public RSS)
+# Categories: Finance · Macro · Géopolitique · Banques centrales · Tech
+# ─────────────────────────────────────────────────────────────
+TWITTER_ACCOUNTS = {
+    # ── Macro & Économie ──
+    "Elon Musk":            {"handle": "elonmusk",        "cat": "Tech/Géopol",   "weight": 0.9},
+    "Nouriel Roubini":      {"handle": "nouriel",         "cat": "Macro Bear",    "weight": 0.85},
+    "Ray Dalio":            {"handle": "raydalio",        "cat": "Macro",         "weight": 0.90},
+    "Mohamed El-Erian":     {"handle": "mohamedelerian",  "cat": "Macro/BCE",     "weight": 0.88},
+    "Larry Summers":        {"handle": "lawrencehsummers","cat": "Macro Policy",  "weight": 0.85},
+    "Cathie Wood":          {"handle": "cathiedwood",     "cat": "Innovation",    "weight": 0.80},
+    "Michael Burry":        {"handle": "michaeljburry",   "cat": "Macro Bear",    "weight": 0.87},
+    "Bill Ackman":          {"handle": "billackman",      "cat": "Macro/Equity",  "weight": 0.85},
+    "Stanley Druckenmiller":{"handle": "stan_druckenmiller","cat": "Macro",       "weight": 0.90},
+    # ── Finance & Trading ──
+    "Jim Cramer":           {"handle": "jimcramer",       "cat": "Finance",       "weight": 0.70},
+    "Carl Icahn":           {"handle": "carlicahn",       "cat": "Activist",      "weight": 0.80},
+    "Scott Bessent":        {"handle": "scottbessent",    "cat": "Macro/Trésor",  "weight": 0.85},
+    "David Einhorn":        {"handle": "davideinhorn",    "cat": "Value",         "weight": 0.80},
+    "Paul Tudor Jones":     {"handle": "ptj_official",    "cat": "Macro Trading", "weight": 0.88},
+    "Jeff Gundlach":        {"handle": "trancool",        "cat": "Bonds/Macro",   "weight": 0.85},
+    # ── Banques centrales & Politique ──
+    "Fed Reserve":          {"handle": "federalreserve",  "cat": "Banque centrale","weight": 0.95},
+    "ECB":                  {"handle": "ecb",             "cat": "Banque centrale","weight": 0.95},
+    "IMF":                  {"handle": "imf",             "cat": "Institution",   "weight": 0.90},
+    "World Bank":           {"handle": "worldbank",       "cat": "Institution",   "weight": 0.85},
+    "BIS":                  {"handle": "bis_org",         "cat": "Banque centrale","weight": 0.90},
+    # ── Géopolitique ──
+    "Ian Bremmer":          {"handle": "ianbremmer",      "cat": "Géopolitique",  "weight": 0.88},
+    "George Friedman":      {"handle": "georgefriedman",  "cat": "Géopolitique",  "weight": 0.85},
+    "Niall Ferguson":        {"handle": "nfergus",         "cat": "Histoire/Géo",  "weight": 0.82},
+    "Fareed Zakaria":       {"handle": "fareedzakaria",   "cat": "Géopolitique",  "weight": 0.82},
+    "Francis Fukuyama":     {"handle": "fukuyama_francis","cat": "Géopolitique",  "weight": 0.80},
+    # ── Crypto & Tech Finance ──
+    "Michael Saylor":       {"handle": "saylor",          "cat": "Bitcoin/Macro", "weight": 0.80},
+    "Balaji Srinivasan":    {"handle": "balajis",         "cat": "Tech/Macro",    "weight": 0.78},
+    "Raoul Pal":            {"handle": "raoulpal",        "cat": "Macro/Crypto",  "weight": 0.82},
+    # ── Media Finance FR ──
+    "BFM Bourse":           {"handle": "bfmbusiness",     "cat": "Finance FR",    "weight": 0.75},
+    "Les Echos":            {"handle": "lesechos",        "cat": "Finance FR",    "weight": 0.78},
+}
+
+# Nitter instances (public, no auth required) — tried in order
+NITTER_INSTANCES = [
+    "https://nitter.net",
+    "https://nitter.privacydev.net",
+    "https://nitter.poast.org",
+    "https://nitter.mint.lgbt",
+    "https://nitter.unixfox.eu",
+]
+
+TWITTER_CATEGORIES = sorted(set(v["cat"] for v in TWITTER_ACCOUNTS.values()))
+
 ECONOMIC_INDICATORS = {
     "Inflation US (CPI)":       {"value": 3.2,  "trend": "↘", "impact": "négatif", "weight": 0.12},
     "Taux Fed (FFR)":           {"value": 5.25, "trend": "→", "impact": "négatif", "weight": 0.15},
@@ -286,6 +340,134 @@ def fetch_news_sentiment() -> list:
             continue
     
     return articles
+
+
+@st.cache_data(ttl=900)
+def fetch_twitter_sentiment(max_per_account: int = 5) -> list:
+    """
+    Fetch recent tweets from key accounts via Nitter RSS (no API key needed).
+    Falls back gracefully if all instances are down.
+    """
+    articles = []
+
+    for account_name, meta in TWITTER_ACCOUNTS.items():
+        handle   = meta["handle"]
+        cat      = meta["cat"]
+        weight   = meta["weight"]
+        fetched  = False
+
+        for nitter_base in NITTER_INSTANCES:
+            rss_url = f"{nitter_base}/{handle}/rss"
+            try:
+                feed = feedparser.parse(rss_url)
+                if not feed.entries:
+                    continue
+
+                for entry in feed.entries[:max_per_account]:
+                    title   = entry.get("title", "")
+                    summary = entry.get("summary", entry.get("description", ""))
+                    pub     = entry.get("published", "")
+
+                    # Strip HTML tags from summary
+                    if summary:
+                        try:
+                            from bs4 import BeautifulSoup as _BS
+                            summary = _BS(summary, "html.parser").get_text()[:300]
+                        except Exception:
+                            summary = summary[:300]
+
+                    if not title or len(title) < 5:
+                        continue
+
+                    # NLP sentiment
+                    blob = TextBlob(title + " " + summary[:200])
+                    polarity      = blob.sentiment.polarity
+                    subjectivity  = blob.sentiment.subjectivity
+
+                    # Weight-adjusted polarity
+                    adj_polarity  = polarity * weight
+
+                    sentiment_label = "neutre"
+                    if polarity > 0.05:  sentiment_label = "positif"
+                    elif polarity < -0.05: sentiment_label = "négatif"
+
+                    articles.append({
+                        "source":       f"@{handle}",
+                        "account_name": account_name,
+                        "category":     cat,
+                        "title":        title[:150],
+                        "polarity":     polarity,
+                        "adj_polarity": adj_polarity,
+                        "subjectivity": subjectivity,
+                        "sentiment":    sentiment_label,
+                        "published":    pub[:30] if pub else "",
+                        "weight":       weight,
+                        "link":         entry.get("link", "#"),
+                        "type":         "twitter",
+                    })
+
+                fetched = True
+                break  # got data from this instance, move to next account
+
+            except Exception:
+                continue  # try next nitter instance
+
+        if not fetched:
+            # Account unreachable — add placeholder so UI shows source
+            articles.append({
+                "source": f"@{handle}", "account_name": account_name,
+                "category": cat, "title": f"[Données non disponibles — {account_name}]",
+                "polarity": 0.0, "adj_polarity": 0.0, "subjectivity": 0.0,
+                "sentiment": "neutre", "published": "", "weight": weight,
+                "link": f"https://twitter.com/{handle}", "type": "twitter_unavailable",
+            })
+
+    return articles
+
+
+def compute_twitter_score(twitter_articles: list) -> dict:
+    """Compute aggregate sentiment score from Twitter accounts."""
+    available = [a for a in twitter_articles if a.get("type") != "twitter_unavailable"]
+    if not available:
+        return {"score": 50, "bull": 0, "bear": 0, "neutral": 0,
+                "weighted_polarity": 0.0, "by_category": {}}
+
+    bull    = sum(1 for a in available if a["sentiment"] == "positif")
+    bear    = sum(1 for a in available if a["sentiment"] == "négatif")
+    neutral = len(available) - bull - bear
+
+    # Weighted average polarity
+    total_w  = sum(a["weight"] for a in available)
+    wtd_pol  = sum(a["adj_polarity"] for a in available) / max(total_w, 1)
+
+    # Score 0-100
+    score = 50 + wtd_pol * 200  # ±0.25 polarity → ±50 pts
+    score = float(np.clip(score, 5, 95))
+
+    # By category
+    by_cat = {}
+    for a in available:
+        cat = a["category"]
+        if cat not in by_cat:
+            by_cat[cat] = {"bull": 0, "bear": 0, "neutral": 0, "polarity": []}
+        if a["sentiment"] == "positif":   by_cat[cat]["bull"] += 1
+        elif a["sentiment"] == "négatif": by_cat[cat]["bear"] += 1
+        else:                             by_cat[cat]["neutral"] += 1
+        by_cat[cat]["polarity"].append(a["polarity"])
+
+    for cat in by_cat:
+        pols = by_cat[cat]["polarity"]
+        by_cat[cat]["avg_polarity"] = round(float(np.mean(pols)), 3) if pols else 0.0
+
+    return {
+        "score":             round(score, 1),
+        "bull":              bull,
+        "bear":              bear,
+        "neutral":           neutral,
+        "total":             len(available),
+        "weighted_polarity": round(wtd_pol, 4),
+        "by_category":       by_cat,
+    }
 
 
 @st.cache_data(ttl=120)
@@ -523,18 +705,15 @@ def compute_technical_signal(df: pd.DataFrame) -> dict:
     }
 
 
-def compute_fundamental_score(news_articles: list) -> dict:
-    """Compute fundamental/macro sentiment score."""
-    # Economic indicators score
+def compute_fundamental_score(news_articles: list, twitter_score: dict = None) -> dict:
+    """Compute fundamental/macro sentiment score including Twitter signals."""
     eco_bull = 0
     eco_bear = 0
     eco_signals = []
-    
+
     for name, data in ECONOMIC_INDICATORS.items():
         w = data["weight"] * 10
         impact = data["impact"]
-        trend  = data["trend"]
-        
         if impact == "positif":
             eco_bull += w
             eco_signals.append({"name": name, "signal": "🟢", "value": str(data["value"])})
@@ -543,26 +722,29 @@ def compute_fundamental_score(news_articles: list) -> dict:
             eco_signals.append({"name": name, "signal": "🔴", "value": str(data["value"])})
         else:
             eco_signals.append({"name": name, "signal": "⚪", "value": str(data["value"])})
-    
-    # News sentiment score
-    news_bull = sum(1 for a in news_articles if a["sentiment"] == "positif")
-    news_bear = sum(1 for a in news_articles if a["sentiment"] == "négatif")
+
+    # News sentiment score (RSS)
+    news_bull  = sum(1 for a in news_articles if a["sentiment"] == "positif")
+    news_bear  = sum(1 for a in news_articles if a["sentiment"] == "négatif")
     news_total = max(len(news_articles), 1)
     news_score = (news_bull / news_total) * 100
-    
-    # Combined
+
+    # Twitter/X sentiment score
+    tw_score = twitter_score.get("score", 50) if twitter_score else 50
+
+    # Combined: eco 60% · news RSS 20% · Twitter 20%
     eco_total = eco_bull + eco_bear
     eco_score = (eco_bull / eco_total * 100) if eco_total > 0 else 50
-    
-    combined = eco_score * 0.7 + news_score * 0.3
-    
+    combined  = eco_score * 0.60 + news_score * 0.20 + tw_score * 0.20
+
     return {
-        "eco_score": eco_score,
-        "news_score": news_score,
-        "combined": combined,
-        "eco_signals": eco_signals,
-        "news_bull": news_bull,
-        "news_bear": news_bear,
+        "eco_score":    eco_score,
+        "news_score":   news_score,
+        "twitter_score": tw_score,
+        "combined":     combined,
+        "eco_signals":  eco_signals,
+        "news_bull":    news_bull,
+        "news_bear":    news_bear,
         "news_neutral": news_total - news_bull - news_bear,
     }
 
@@ -1442,6 +1624,649 @@ def generate_pdf_report(
 
 
 
+
+
+# ═══════════════════════════════════════════════════════════════════
+# MULTI-AGENT SIMULATION ENGINE
+# ═══════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
+# MULTI-AGENT SIMULATION ENGINE  (MiroFish-inspired)
+# ═══════════════════════════════════════════════════════════════════
+
+def run_agent_macro_strategist(df: pd.DataFrame, fund_score: dict) -> dict:
+    """Macro Strategist Agent — reads economic environment."""
+    eco = fund_score.get("eco_score", 50)
+    vix_proxy = ECONOMIC_INDICATORS.get("VIX (Peur marché)", {}).get("value", 20)
+    yield_curve = ECONOMIC_INDICATORS.get("Courbe des taux (2-10y)", {}).get("value", 0)
+    fed_rate = ECONOMIC_INDICATORS.get("Taux Fed (FFR)", {}).get("value", 5.25)
+    dxy = ECONOMIC_INDICATORS.get("Indice Dollar (DXY)", {}).get("value", 104)
+
+    # Score macro bull/bear
+    score = 50.0
+    signals = []
+
+    if vix_proxy < 15:
+        score += 8; signals.append(("VIX faible → calme de marché", "+8", "#10b981"))
+    elif vix_proxy > 25:
+        score -= 10; signals.append(("VIX élevé → peur dominante", "-10", "#ef4444"))
+    else:
+        score -= 2; signals.append(("VIX modéré", "-2", "#3b82f6"))
+
+    if yield_curve > 0:
+        score += 6; signals.append(("Courbe normale → croissance", "+6", "#10b981"))
+    elif yield_curve < -0.5:
+        score -= 8; signals.append(("Courbe inversée → récession", "-8", "#ef4444"))
+    else:
+        score -= 3; signals.append(("Courbe plate → incertitude", "-3", "#fbbf24"))
+
+    if fed_rate > 5.0:
+        score -= 6; signals.append(("Taux élevés → pression sur actions", "-6", "#ef4444"))
+    elif fed_rate < 2.0:
+        score += 8; signals.append(("Taux bas → liquidité abondante", "+8", "#10b981"))
+
+    if dxy > 105:
+        score -= 4; signals.append(("Dollar fort → pression sur commodités", "-4", "#ef4444"))
+    elif dxy < 100:
+        score += 4; signals.append(("Dollar faible → favorable marchés émergents", "+4", "#10b981"))
+
+    score = np.clip(score + (eco - 50) * 0.3, 5, 95)
+    return {"name": "🏛️ Macro Strategist", "score": round(score, 1), "signals": signals,
+            "bias": "BULL" if score > 55 else "BEAR" if score < 45 else "NEUTRAL",
+            "confidence": round(abs(score - 50) * 2, 1)}
+
+
+def run_agent_technical_analyst(df: pd.DataFrame) -> dict:
+    """Technical Analyst Agent — pure price action."""
+    if df.empty or len(df) < 20:
+        return {"name": "📐 Technical Analyst", "score": 50.0, "signals": [],
+                "bias": "NEUTRAL", "confidence": 0}
+
+    df2 = compute_indicators(df.copy())
+    last = df2.iloc[-1]
+    prev = df2.iloc[-2] if len(df2) > 1 else last
+
+    score = 50.0
+    signals = []
+
+    # RSI
+    rsi = last.get("RSI", 50)
+    if not np.isnan(rsi):
+        if rsi < 30:   score += 12; signals.append((f"RSI={rsi:.0f} → oversold rebond probable", "+12", "#10b981"))
+        elif rsi > 70: score -= 12; signals.append((f"RSI={rsi:.0f} → overbought correction probable", "-12", "#ef4444"))
+        elif rsi > 55: score += 4;  signals.append((f"RSI={rsi:.0f} → momentum positif", "+4", "#10b981"))
+        elif rsi < 45: score -= 4;  signals.append((f"RSI={rsi:.0f} → momentum négatif", "-4", "#ef4444"))
+
+    # MACD cross
+    macd = last.get("MACD", 0); msig = last.get("MACD_signal", 0)
+    pmacd = prev.get("MACD", 0); pmsig = prev.get("MACD_signal", 0)
+    if not np.isnan(macd):
+        if macd > msig and pmacd <= pmsig: score += 14; signals.append(("MACD golden cross ↑", "+14", "#10b981"))
+        elif macd < msig and pmacd >= pmsig: score -= 14; signals.append(("MACD death cross ↓", "-14", "#ef4444"))
+        elif macd > msig: score += 5; signals.append(("MACD positif", "+5", "#10b981"))
+        else: score -= 5; signals.append(("MACD négatif", "-5", "#ef4444"))
+
+    # EMA
+    ema9 = last.get("EMA9", 0); ema21 = last.get("EMA21", 0); close = last["Close"]
+    if not np.isnan(ema9):
+        if close > ema9 > ema21: score += 8; signals.append(("Prix > EMA9 > EMA21 → trend haussier", "+8", "#10b981"))
+        elif close < ema9 < ema21: score -= 8; signals.append(("Prix < EMA9 < EMA21 → trend baissier", "-8", "#ef4444"))
+
+    # BB position
+    bbu = last.get("BB_upper", close*1.01); bbl = last.get("BB_lower", close*0.99)
+    if not np.isnan(bbu):
+        bb_pct = (close - bbl) / (bbu - bbl + 1e-10) * 100
+        if bb_pct > 85:   score -= 6; signals.append((f"Prix en zone haute BB ({bb_pct:.0f}%)", "-6", "#ef4444"))
+        elif bb_pct < 15: score += 6; signals.append((f"Prix en zone basse BB ({bb_pct:.0f}%)", "+6", "#10b981"))
+
+    # Momentum 10 bars
+    if len(df2) >= 10:
+        ret = (df2["Close"].iloc[-1] / df2["Close"].iloc[-10] - 1) * 100
+        if ret > 1.5:   score += 7; signals.append((f"Momentum +10 bars: {ret:+.2f}%", "+7", "#10b981"))
+        elif ret < -1.5: score -= 7; signals.append((f"Momentum +10 bars: {ret:+.2f}%", "-7", "#ef4444"))
+
+    score = np.clip(score, 5, 95)
+    return {"name": "📐 Technical Analyst", "score": round(score, 1), "signals": signals,
+            "bias": "BULL" if score > 55 else "BEAR" if score < 45 else "NEUTRAL",
+            "confidence": round(abs(score - 50) * 2, 1)}
+
+
+def run_agent_sentiment_analyst(news_articles: list, fund_score: dict) -> dict:
+    """Sentiment Analyst Agent — NLP + social proxy."""
+    news_score = fund_score.get("news_score", 50)
+    nb_pos = fund_score.get("news_bull", 0)
+    nb_neg = fund_score.get("news_bear", 0)
+    total  = max(nb_pos + nb_neg + fund_score.get("news_neutral", 1), 1)
+
+    score = 50.0
+    signals = []
+
+    # Ratio positif/négatif
+    ratio = nb_pos / max(nb_neg, 1)
+    if ratio > 2.5:  score += 15; signals.append((f"Ratio pos/neg={ratio:.1f} → euphorie médiatique", "+15", "#10b981"))
+    elif ratio > 1.5: score += 8; signals.append((f"Ratio pos/neg={ratio:.1f} → biais positif", "+8", "#10b981"))
+    elif ratio < 0.5: score -= 12; signals.append((f"Ratio pos/neg={ratio:.1f} → panique médiatique", "-12", "#ef4444"))
+    elif ratio < 0.8: score -= 6; signals.append((f"Ratio pos/neg={ratio:.1f} → biais négatif", "-6", "#ef4444"))
+    else:             signals.append((f"Ratio pos/neg={ratio:.1f} → équilibré", "0", "#3b82f6"))
+
+    # Intensité polarité moyenne
+    if news_articles:
+        avg_pol = np.mean([a.get("polarity", 0) for a in news_articles])
+        if avg_pol > 0.15:   score += 10; signals.append((f"Polarité moyenne={avg_pol:+.3f} → fortement positif", "+10", "#10b981"))
+        elif avg_pol > 0.05: score += 5;  signals.append((f"Polarité moyenne={avg_pol:+.3f} → légèrement positif", "+5", "#10b981"))
+        elif avg_pol < -0.15: score -= 10; signals.append((f"Polarité moyenne={avg_pol:+.3f} → fortement négatif", "-10", "#ef4444"))
+        elif avg_pol < -0.05: score -= 5;  signals.append((f"Polarité moyenne={avg_pol:+.3f} → légèrement négatif", "-5", "#ef4444"))
+
+    # Tech/AI sentiment proxy
+    tech_sent = ECONOMIC_INDICATORS.get("Sentiment IA/Tech", {}).get("value", 50)
+    if tech_sent > 70: score += 6; signals.append((f"Sentiment IA/Tech={tech_sent} -> euphorique", "+6", "#10b981"))
+    elif tech_sent < 40: score -= 6; signals.append((f"Sentiment IA/Tech={tech_sent} -> pessimiste", "-6", "#ef4444"))
+
+    # Twitter signal via fund_score if available
+    tw_sc = fund_score.get("twitter_score", 50)
+    if tw_sc > 60:   score += 8; signals.append((f"Twitter score={tw_sc:.0f} -> signal haussier", "+8", "#10b981"))
+    elif tw_sc < 40: score -= 8; signals.append((f"Twitter score={tw_sc:.0f} -> signal baissier", "-8", "#ef4444"))
+
+    score = np.clip(score, 5, 95)
+    return {"name": "📱 Sentiment Analyst", "score": round(score, 1), "signals": signals,
+            "bias": "BULL" if score > 55 else "BEAR" if score < 45 else "NEUTRAL",
+            "confidence": round(abs(score - 50) * 2, 1)}
+
+
+def run_agent_earnings_analyst(market_name: str, price_info: dict) -> dict:
+    """Earnings / Fundamentals Agent — valuation & growth proxy."""
+    score = 50.0
+    signals = []
+
+    eps_growth = ECONOMIC_INDICATORS.get("Earnings S&P500 Growth", {}).get("value", 0)
+    pmi_mfg    = ECONOMIC_INDICATORS.get("PMI Manufacturier US", {}).get("value", 50)
+    pmi_svc    = ECONOMIC_INDICATORS.get("PMI Services US", {}).get("value", 50)
+    gdp        = ECONOMIC_INDICATORS.get("PIB US (QoQ)", {}).get("value", 2)
+    consumer   = ECONOMIC_INDICATORS.get("Confiance consommateur", {}).get("value", 100)
+
+    if eps_growth > 8:   score += 12; signals.append((f"EPS growth={eps_growth}% → fort", "+12", "#10b981"))
+    elif eps_growth > 4: score += 6;  signals.append((f"EPS growth={eps_growth}% → correct", "+6", "#10b981"))
+    elif eps_growth < 0: score -= 10; signals.append((f"EPS growth={eps_growth}% → contraction", "-10", "#ef4444"))
+
+    if pmi_mfg > 52: score += 5; signals.append((f"PMI Mfg={pmi_mfg} → expansion", "+5", "#10b981"))
+    elif pmi_mfg < 48: score -= 5; signals.append((f"PMI Mfg={pmi_mfg} → contraction", "-5", "#ef4444"))
+
+    if pmi_svc > 54: score += 6; signals.append((f"PMI Services={pmi_svc} → solide", "+6", "#10b981"))
+    elif pmi_svc < 50: score -= 5; signals.append((f"PMI Services={pmi_svc} → faible", "-5", "#ef4444"))
+
+    if gdp > 2.5: score += 7; signals.append((f"PIB={gdp}% → croissance saine", "+7", "#10b981"))
+    elif gdp < 0: score -= 10; signals.append((f"PIB={gdp}% → récession", "-10", "#ef4444"))
+
+    if consumer > 105: score += 5; signals.append((f"Confiance conso={consumer} → élevée", "+5", "#10b981"))
+    elif consumer < 90: score -= 5; signals.append((f"Confiance conso={consumer} → faible", "-5", "#ef4444"))
+
+    # Adjust for commodity vs equity
+    if market_name in ("Or (Gold)", "Pétrole (WTI)"):
+        inflation = ECONOMIC_INDICATORS.get("Inflation US (CPI)", {}).get("value", 3)
+        if inflation > 3.5 and market_name == "Or (Gold)":
+            score += 8; signals.append((f"Inflation={inflation}% → Or attractif", "+8", "#10b981"))
+        if market_name == "Pétrole (WTI)":
+            geopo = ECONOMIC_INDICATORS.get("Tension géopolitique", {}).get("value", 5)
+            if geopo > 7: score += 8; signals.append((f"Tensions géopo={geopo}/10 → soutien pétrole", "+8", "#10b981"))
+
+    score = np.clip(score, 5, 95)
+    return {"name": "💹 Earnings Analyst", "score": round(score, 1), "signals": signals,
+            "bias": "BULL" if score > 55 else "BEAR" if score < 45 else "NEUTRAL",
+            "confidence": round(abs(score - 50) * 2, 1)}
+
+
+def run_agent_flow_analyst(df: pd.DataFrame) -> dict:
+    """Institutional Flow Analyst — volume & money flow."""
+    score = 50.0
+    signals = []
+
+    if df.empty or len(df) < 10:
+        return {"name": "🌊 Flow Analyst", "score": 50.0, "signals": [],
+                "bias": "NEUTRAL", "confidence": 0}
+
+    df2 = compute_indicators(df.copy())
+
+    # OBV trend
+    if "OBV" in df2.columns and len(df2) >= 10:
+        obv_now  = df2["OBV"].iloc[-1]
+        obv_prev = df2["OBV"].iloc[-10]
+        obv_pct  = (obv_now - obv_prev) / (abs(obv_prev) + 1) * 100
+        if obv_pct > 5:   score += 12; signals.append((f"OBV +{obv_pct:.1f}% → accumulation institutionnelle", "+12", "#10b981"))
+        elif obv_pct < -5: score -= 12; signals.append((f"OBV {obv_pct:.1f}% → distribution institutionnelle", "-12", "#ef4444"))
+        else: signals.append((f"OBV stable → flux neutre", "0", "#3b82f6"))
+
+    # Volume vs SMA
+    if "Vol_SMA" in df2.columns:
+        last_vol = df2["Volume"].iloc[-1]
+        vol_sma  = df2["Vol_SMA"].iloc[-1]
+        last_close = df2["Close"].iloc[-1]
+        prev_close = df2["Close"].iloc[-2] if len(df2) > 1 else last_close
+        if not np.isnan(vol_sma) and vol_sma > 0:
+            vol_ratio = last_vol / vol_sma
+            if vol_ratio > 1.5 and last_close > prev_close:
+                score += 10; signals.append((f"Volume x{vol_ratio:.1f} sur hausse → achat fort", "+10", "#10b981"))
+            elif vol_ratio > 1.5 and last_close < prev_close:
+                score -= 10; signals.append((f"Volume x{vol_ratio:.1f} sur baisse → vente forte", "-10", "#ef4444"))
+            elif vol_ratio < 0.5:
+                signals.append(("Volume très faible → conviction absente", "0", "#fbbf24"))
+
+    # Institutional flow indicator (proxy)
+    inst_flow = ECONOMIC_INDICATORS.get("Flux institutionnels", {}).get("value", 50)
+    if inst_flow > 65: score += 8; signals.append((f"Flux instit.={inst_flow} → entrées", "+8", "#10b981"))
+    elif inst_flow < 40: score -= 8; signals.append((f"Flux instit.={inst_flow} → sorties", "-8", "#ef4444"))
+
+    score = np.clip(score, 5, 95)
+    return {"name": "🌊 Flow Analyst", "score": round(score, 1), "signals": signals,
+            "bias": "BULL" if score > 55 else "BEAR" if score < 45 else "NEUTRAL",
+            "confidence": round(abs(score - 50) * 2, 1)}
+
+
+def run_agent_risk_analyst(df: pd.DataFrame, market_name: str) -> dict:
+    """Risk / Volatility Agent — tail risk & stress."""
+    score = 50.0
+    signals = []
+
+    vix   = ECONOMIC_INDICATORS.get("VIX (Peur marché)", {}).get("value", 18)
+    geopo = ECONOMIC_INDICATORS.get("Tension géopolitique", {}).get("value", 5)
+    polrisk = ECONOMIC_INDICATORS.get("Élections/Risque politique", {}).get("value", 5)
+
+    if vix < 13:   score += 10; signals.append((f"VIX={vix} → complacency → risque retournement", "+10 (attention)", "#fbbf24"))
+    elif vix < 18: score += 6;  signals.append((f"VIX={vix} → faible → environnement sain", "+6", "#10b981"))
+    elif vix > 25: score -= 12; signals.append((f"VIX={vix} → peur → vente panique possible", "-12", "#ef4444"))
+    elif vix > 20: score -= 6;  signals.append((f"VIX={vix} → incertitude", "-6", "#fbbf24"))
+
+    if geopo > 7:   score -= 10; signals.append((f"Géopolitique={geopo}/10 → risque élevé", "-10", "#ef4444"))
+    elif geopo > 5: score -= 4;  signals.append((f"Géopolitique={geopo}/10 → risque modéré", "-4", "#fbbf24"))
+
+    if polrisk > 6: score -= 6; signals.append((f"Risque politique={polrisk}/10 → élevé", "-6", "#ef4444"))
+
+    # ATR-based vol
+    if not df.empty and len(df) >= 14:
+        df2 = compute_indicators(df.copy())
+        atr = df2["ATR"].iloc[-1] if "ATR" in df2.columns else np.nan
+        close = df2["Close"].iloc[-1]
+        if not np.isnan(atr) and close > 0:
+            atr_pct = atr / close * 100
+            if atr_pct > 2.0:  score -= 8; signals.append((f"ATR={atr_pct:.2f}% → forte volatilité", "-8", "#ef4444"))
+            elif atr_pct < 0.5: score += 6; signals.append((f"ATR={atr_pct:.2f}% → faible volatilité", "+6", "#10b981"))
+            else: signals.append((f"ATR={atr_pct:.2f}% → volatilité normale", "0", "#3b82f6"))
+
+    score = np.clip(score, 5, 95)
+    return {"name": "⚠️ Risk Analyst", "score": round(score, 1), "signals": signals,
+            "bias": "BULL" if score > 55 else "BEAR" if score < 45 else "NEUTRAL",
+            "confidence": round(abs(score - 50) * 2, 1)}
+
+
+def run_monte_carlo_simulation(
+    df: pd.DataFrame,
+    agents: list,
+    timeframe_minutes: int,
+    n_simulations: int = 500,
+) -> dict:
+    """
+    Monte Carlo price path simulation.
+    Combines agent scores + historical volatility to simulate price paths.
+    Returns distribution of outcomes.
+    """
+    if df.empty or len(df) < 10:
+        return {}
+
+    close = df["Close"].dropna()
+    current_price = close.iloc[-1]
+
+    # Historical vol (annualized → per-bar)
+    log_returns = np.log(close / close.shift(1)).dropna()
+    hist_vol = log_returns.std()
+    if np.isnan(hist_vol) or hist_vol == 0:
+        hist_vol = 0.001
+
+    # Agent consensus score → drift
+    valid_agents = [a for a in agents if a.get("score") is not None]
+    if not valid_agents:
+        return {}
+
+    weights = {"🏛️ Macro Strategist": 0.20, "📐 Technical Analyst": 0.35,
+               "📱 Sentiment Analyst": 0.15, "💹 Earnings Analyst": 0.15,
+               "🌊 Flow Analyst": 0.10, "⚠️ Risk Analyst": 0.05}
+
+    weighted_score = 0.0
+    total_w = 0.0
+    for agent in valid_agents:
+        w = weights.get(agent["name"], 0.1)
+        weighted_score += agent["score"] * w
+        total_w += w
+    if total_w > 0:
+        weighted_score /= total_w
+
+    # Convert score 0-100 → drift per bar (score 50 = zero drift)
+    # Scale: ±50 points = ±0.5% drift per bar
+    drift = (weighted_score - 50) / 100 * 0.005
+
+    # Time horizon in bars
+    n_bars = max(1, timeframe_minutes // max(len(df), 1) * 10)
+    n_bars = min(n_bars, 50)
+
+    # Run simulations
+    np.random.seed(42)
+    end_prices = []
+    paths_sample = []  # store 50 sample paths for chart
+
+    for i in range(n_simulations):
+        returns = np.random.normal(drift, hist_vol, n_bars)
+        path = current_price * np.exp(np.cumsum(returns))
+        end_prices.append(path[-1])
+        if i < 50:
+            paths_sample.append(path)
+
+    end_prices = np.array(end_prices)
+
+    bull_prob  = (end_prices > current_price).mean() * 100
+    bear_prob  = 100 - bull_prob
+    mean_price = end_prices.mean()
+    p10 = np.percentile(end_prices, 10)
+    p25 = np.percentile(end_prices, 25)
+    p50 = np.percentile(end_prices, 50)
+    p75 = np.percentile(end_prices, 75)
+    p90 = np.percentile(end_prices, 90)
+
+    expected_return = (mean_price / current_price - 1) * 100
+    max_gain = (end_prices.max() / current_price - 1) * 100
+    max_loss = (end_prices.min() / current_price - 1) * 100
+    vol_outcome = end_prices.std() / current_price * 100
+
+    return {
+        "current_price":    current_price,
+        "mean_price":       mean_price,
+        "bull_prob":        round(bull_prob, 1),
+        "bear_prob":        round(bear_prob, 1),
+        "expected_return":  round(expected_return, 3),
+        "p10": p10, "p25": p25, "p50": p50, "p75": p75, "p90": p90,
+        "max_gain":         round(max_gain, 2),
+        "max_loss":         round(max_loss, 2),
+        "vol_outcome":      round(vol_outcome, 3),
+        "n_simulations":    n_simulations,
+        "n_bars":           n_bars,
+        "weighted_score":   round(weighted_score, 1),
+        "drift_per_bar":    round(drift * 100, 4),
+        "hist_vol_per_bar": round(hist_vol * 100, 4),
+        "paths_sample":     paths_sample,
+        "end_prices":       end_prices,
+    }
+
+
+def build_scenario_matrix(agents: list, base_mc: dict) -> list:
+    """Generate Bull / Base / Bear scenarios."""
+    if not base_mc:
+        return []
+    cp = base_mc["current_price"]
+    scenarios = []
+
+    for name, score_adj, prob_adj, color, icon in [
+        ("🚀 Bull Case",  +15, +20, "#10b981", "📈"),
+        ("📊 Base Case",    0,   0, "#3b82f6", "➡️"),
+        ("🔻 Bear Case",  -15, -20, "#ef4444", "📉"),
+    ]:
+        adj_score = np.clip(base_mc["weighted_score"] + score_adj, 5, 95)
+        drift_adj = (adj_score - 50) / 100 * 0.005
+        exp_ret = drift_adj * base_mc["n_bars"] * 100
+        target = round(cp * (1 + exp_ret / 100), 4)
+        prob = np.clip(base_mc["bull_prob"] + prob_adj, 5, 95) if "Bull" in name else \
+               np.clip(base_mc["bear_prob"] + prob_adj, 5, 95) if "Bear" in name else \
+               round(base_mc["bull_prob"], 1)
+        scenarios.append({
+            "name": name, "color": color, "icon": icon,
+            "score": round(adj_score, 1),
+            "target_price": target,
+            "expected_return": round(exp_ret, 3),
+            "probability": round(prob, 1),
+        })
+    return scenarios
+
+
+
+
+# ═══════════════════════════════════════════════════════════════════
+# SIMULATION CHARTS
+# ═══════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
+# SIMULATION CHARTS
+# ═══════════════════════════════════════════════════════════════════
+
+def make_agent_radar(agents: list, market_name: str) -> go.Figure:
+    """Radar chart of all agent scores."""
+    categories = [a["name"].split(" ", 1)[1] if " " in a["name"] else a["name"] for a in agents]
+    values     = [a["score"] for a in agents]
+    values_closed = values + [values[0]]
+    cats_closed   = categories + [categories[0]]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatterpolar(
+        r=values_closed, theta=cats_closed,
+        fill='toself',
+        fillcolor='rgba(0,212,255,0.15)',
+        line=dict(color='#00d4ff', width=2),
+        name="Score agents",
+    ))
+    fig.add_trace(go.Scatterpolar(
+        r=[50]*len(cats_closed), theta=cats_closed,
+        line=dict(color='rgba(255,255,255,0.2)', dash='dash', width=1),
+        showlegend=False,
+    ))
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(visible=True, range=[0,100], tickfont=dict(size=9, color="#8892b0"),
+                            gridcolor="#1e3a5f", linecolor="#1e3a5f"),
+            angularaxis=dict(tickfont=dict(size=9, color="#ccd6f6"), gridcolor="#1e3a5f"),
+            bgcolor="#0e1117",
+        ),
+        paper_bgcolor="#0e1117",
+        title=dict(text=f"Consensus agents — {market_name}", font=dict(color="#00d4ff", size=13)),
+        height=380,
+        font=dict(color="#8892b0"),
+        showlegend=False,
+        margin=dict(t=50, b=20, l=40, r=40),
+    )
+    return fig
+
+
+def make_monte_carlo_chart(mc: dict, market_name: str) -> go.Figure:
+    """Fan chart of Monte Carlo price paths."""
+    if not mc or not mc.get("paths_sample"):
+        return go.Figure()
+
+    cp     = mc["current_price"]
+    n_bars = mc["n_bars"]
+    x_axis = list(range(n_bars + 1))
+
+    fig = go.Figure()
+
+    # Draw sample paths (faded)
+    paths = mc["paths_sample"]
+    for i, path in enumerate(paths[:40]):
+        full_path = [cp] + list(path)
+        color = "rgba(0,212,255,0.06)" if full_path[-1] >= cp else "rgba(239,68,68,0.06)"
+        fig.add_trace(go.Scatter(
+            x=x_axis, y=full_path,
+            mode='lines', line=dict(color=color, width=1),
+            showlegend=False, hoverinfo='skip',
+        ))
+
+    # Percentile bands
+    for pct_lo, pct_hi, color, name in [
+        ("p10", "p90", "rgba(59,130,246,0.12)", "P10-P90"),
+        ("p25", "p75", "rgba(59,130,246,0.25)", "P25-P75"),
+    ]:
+        lo_path = [cp] + [mc[pct_lo]] * n_bars
+        hi_path = [cp] + [mc[pct_hi]] * n_bars
+        fig.add_trace(go.Scatter(
+            x=x_axis + x_axis[::-1],
+            y=hi_path + lo_path[::-1],
+            fill='toself', fillcolor=color,
+            line=dict(width=0), name=name, hoverinfo='skip',
+        ))
+
+    # Median and mean paths
+    median_path = [cp] + [mc["p50"]] * n_bars
+    mean_path   = [cp] + [mc["mean_price"]] * n_bars
+    fig.add_trace(go.Scatter(x=x_axis, y=median_path, mode='lines',
+        line=dict(color="#fbbf24", width=2, dash='dash'), name="Médiane"))
+    fig.add_trace(go.Scatter(x=x_axis, y=mean_path, mode='lines',
+        line=dict(color="#00d4ff", width=2), name="Moyenne"))
+    # Current price line
+    fig.add_hline(y=cp, line_dash="dot", line_color="rgba(255,255,255,0.3)",
+                  annotation_text=f"Prix actuel: {cp:,.3f}", annotation_font_color="#ccd6f6")
+
+    fig.update_layout(
+        template="plotly_dark", paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+        title=dict(text=f"🎲 Monte Carlo — {mc['n_simulations']} simulations — {market_name}",
+                   font=dict(color="#00d4ff", size=13)),
+        xaxis_title="Barres à venir", yaxis_title="Prix simulé",
+        height=400,
+        font=dict(color="#8892b0"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+                    font=dict(size=10)),
+        margin=dict(t=60, b=40, l=60, r=20),
+    )
+    return fig
+
+
+def make_probability_distribution(mc: dict, market_name: str) -> go.Figure:
+    """Histogram of simulated end prices with bull/bear split."""
+    if not mc or "end_prices" not in mc:
+        return go.Figure()
+
+    ep = mc["end_prices"]
+    cp = mc["current_price"]
+
+    bull_prices = ep[ep >= cp]
+    bear_prices = ep[ep <  cp]
+
+    fig = go.Figure()
+    if len(bear_prices):
+        fig.add_trace(go.Histogram(x=bear_prices, nbinsx=30, name="Baisse 📉",
+            marker_color="rgba(239,68,68,0.7)", showlegend=True))
+    if len(bull_prices):
+        fig.add_trace(go.Histogram(x=bull_prices, nbinsx=30, name="Hausse 📈",
+            marker_color="rgba(16,185,129,0.7)", showlegend=True))
+
+    fig.add_vline(x=cp,              line_dash="dash", line_color="white",
+                  annotation_text="Actuel", annotation_font_color="#ccd6f6", annotation_position="top")
+    fig.add_vline(x=mc["mean_price"], line_dash="dot", line_color="#00d4ff",
+                  annotation_text="Moyenne", annotation_font_color="#00d4ff")
+
+    fig.update_layout(
+        template="plotly_dark", paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+        title=dict(text=f"Distribution des prix finaux simulés — {market_name}",
+                   font=dict(color="#00d4ff", size=13)),
+        barmode="overlay",
+        xaxis_title="Prix final simulé", yaxis_title="Fréquence",
+        height=320,
+        font=dict(color="#8892b0"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(t=60, b=40, l=60, r=20),
+    )
+    return fig
+
+
+def make_probability_heatmap(all_predictions: dict, markets: dict) -> go.Figure:
+    """Heatmap: markets × timeframes colored by bull probability."""
+    tf_list  = ["5 min", "15 min", "60 min", "240 min"]
+    mkt_list = list(markets.keys())
+
+    z = []
+    text = []
+    for mkt in mkt_list:
+        row_z = []
+        row_t = []
+        for tf in tf_list:
+            p = all_predictions.get(mkt, {}).get(tf, {})
+            bp = p.get("bull_prob", 50)
+            d  = p.get("direction", "—")
+            row_z.append(bp)
+            row_t.append(f"{d[:4]}<br>{bp}%")
+        z.append(row_z)
+        text.append(row_t)
+
+    fig = go.Figure(go.Heatmap(
+        z=z, x=tf_list, y=[f"{markets[m]['icon']} {m}" for m in mkt_list],
+        text=text, texttemplate="%{text}",
+        colorscale=[
+            [0.0,  "#7f1d1d"],
+            [0.35, "#ef4444"],
+            [0.5,  "#1e3a5f"],
+            [0.65, "#10b981"],
+            [1.0,  "#064e3b"],
+        ],
+        zmid=50, zmin=20, zmax=80,
+        textfont=dict(size=10, color="white"),
+        showscale=True,
+        colorbar=dict(title=dict(text="Bull%", font=dict(color="#8892b0")), tickfont=dict(color="#8892b0")),
+    ))
+    fig.update_layout(
+        template="plotly_dark", paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+        title=dict(text="🌡️ Heatmap Probabilités — Marchés × Horizons", font=dict(color="#00d4ff", size=14)),
+        height=320,
+        font=dict(color="#8892b0"),
+        xaxis=dict(side="top"),
+        margin=dict(t=80, b=20, l=160, r=60),
+    )
+    return fig
+
+
+def make_scenario_chart(scenarios: list, mc: dict) -> go.Figure:
+    """Bull / Base / Bear scenario visualization — two separate subplots."""
+    if not scenarios or not mc:
+        return go.Figure()
+
+    cp = mc["current_price"]
+    names   = [s["name"] for s in scenarios]
+    targets = [s["target_price"] for s in scenarios]
+    probs   = [s["probability"] for s in scenarios]
+    colors  = [s["color"] for s in scenarios]
+    rets    = [s["expected_return"] for s in scenarios]
+
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=("Prix cible par scénario", "Probabilité par scénario"),
+        column_widths=[0.55, 0.45],
+        specs=[[{"type": "xy"}, {"type": "domain"}]],
+    )
+
+    # Price targets bar
+    fig.add_trace(go.Bar(
+        x=names, y=targets,
+        marker_color=colors,
+        text=[f"{t:,.3f}<br>({r:+.3f}%)" for t,r in zip(targets,rets)],
+        textposition="outside",
+        textfont=dict(size=10, color="white"),
+        showlegend=False,
+    ), row=1, col=1)
+
+    fig.add_hline(y=cp, line_dash="dot", line_color="rgba(255,255,255,0.4)",
+                  annotation_text=f"Actuel: {cp:,.3f}",
+                  annotation_font_color="#ccd6f6", row=1, col=1)
+
+    # Probability pie
+    fig.add_trace(go.Pie(
+        labels=names, values=probs,
+        marker=dict(colors=colors),
+        textinfo="label+percent",
+        hole=0.4,
+        textfont=dict(size=10),
+        showlegend=False,
+    ), row=1, col=2)
+
+    fig.update_layout(
+        template="plotly_dark", paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+        title=dict(text="📊 Scénarios Bull / Base / Bear", font=dict(color="#00d4ff", size=13)),
+        height=380,
+        font=dict(color="#8892b0"),
+        margin=dict(t=60, b=30, l=40, r=40),
+    )
+    fig.update_yaxes(gridcolor="#1e3a5f", row=1, col=1)
+    return fig
+
+
+
 # ─────────────────────────────────────────────────────────────
 # MAIN APP
 # ─────────────────────────────────────────────────────────────
@@ -1499,8 +2324,10 @@ def main():
 
     # ── Load data ──
     with st.spinner("🔄 Chargement des données en cours..."):
-        news_articles = fetch_news_sentiment()
-        fund_data = compute_fundamental_score(news_articles)
+        news_articles   = fetch_news_sentiment()
+        twitter_articles = fetch_twitter_sentiment(max_per_account=4)
+        tw_score_data   = compute_twitter_score(twitter_articles)
+        fund_data       = compute_fundamental_score(news_articles, tw_score_data)
 
         all_market_prices = {}
         all_predictions = {}
@@ -1519,12 +2346,14 @@ def main():
             all_predictions[mkt_name] = preds
 
     # ── Main tabs ──
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "📊 Dashboard",
         "📈 Graphiques OHLC",
         "🌍 Macro & Sentiment",
         "📰 Actualités",
+        "🐦 Twitter/X Intel",
         "🎯 Conseils Scalping",
+        "🤖 Simulation IA",
         "📋 Sources",
     ])
 
@@ -1582,6 +2411,23 @@ def main():
         with col4:
             combined_score = fund_data["combined"] * 0.5 + tech_sig["score"] * 0.5
             st.plotly_chart(make_sentiment_gauge(combined_score, "Score Global"),
+                            use_container_width=True, config={"displayModeBar": False})
+
+        # Twitter gauge row
+        col_tw1, col_tw2, col_tw3, col_tw4 = st.columns(4)
+        with col_tw1:
+            st.plotly_chart(make_sentiment_gauge(tw_score_data.get("score", 50), "Twitter/X Score"),
+                            use_container_width=True, config={"displayModeBar": False})
+        with col_tw2:
+            tw_bull_pct = tw_score_data.get("bull",0) / max(tw_score_data.get("total",1),1) * 100
+            st.plotly_chart(make_sentiment_gauge(tw_bull_pct, "Twitter Positif%"),
+                            use_container_width=True, config={"displayModeBar": False})
+        with col_tw3:
+            st.plotly_chart(make_sentiment_gauge(fund_data.get("twitter_score",50), "Twitter→Combined"),
+                            use_container_width=True, config={"displayModeBar": False})
+        with col_tw4:
+            fin_combined = fund_data["combined"] * 0.4 + tech_sig["score"] * 0.4 + tw_score_data.get("score",50) * 0.2
+            st.plotly_chart(make_sentiment_gauge(fin_combined, "Score Final"),
                             use_container_width=True, config={"displayModeBar": False})
 
         st.markdown('<div class="section-title">🔮 Prédictions par marché & horizon</div>', unsafe_allow_html=True)
@@ -1742,9 +2588,232 @@ def main():
             st.info("Aucun article trouvé.")
 
     # ══════════════════════════════════════════════
-    # TAB 5: CONSEILS SCALPING  ← NEW
+    # ══════════════════════════════════════════════
+    # TAB 5: TWITTER/X INTELLIGENCE
     # ══════════════════════════════════════════════
     with tab5:
+        st.markdown("""
+        <div style="background:linear-gradient(135deg,#1a1f2e,#0d1b2a);border:1px solid #1da1f2;
+                    border-radius:12px;padding:16px 24px;margin-bottom:16px;">
+            <div style="color:#1da1f2;font-size:1.3em;font-weight:bold;">🐦 Twitter/X Intelligence — Comptes Clés Finance & Géopolitique</div>
+            <div style="color:#8892b0;font-size:0.88em;margin-top:6px;">
+                30 comptes influents analysés via Nitter RSS (sans API key) ·
+                Macro · Trading · Banques centrales · Géopolitique · Tech Finance
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # ── Global Twitter sentiment ──
+        tw_s = tw_score_data
+        tw_total = tw_s.get("total", 0)
+        tw_bull  = tw_s.get("bull", 0)
+        tw_bear  = tw_s.get("bear", 0)
+        tw_neu   = tw_s.get("neutral", 0)
+        tw_sc    = tw_s.get("score", 50)
+        tw_pol   = tw_s.get("weighted_polarity", 0)
+
+        if tw_sc >= 58:    tw_color="#10b981"; tw_label="SENTIMENT POSITIF"; tw_icon="📈"
+        elif tw_sc <= 42:  tw_color="#ef4444"; tw_label="SENTIMENT NÉGATIF"; tw_icon="📉"
+        else:              tw_color="#3b82f6"; tw_label="SENTIMENT NEUTRE";  tw_icon="➡️"
+
+        st.markdown(f"""
+        <div style="background:linear-gradient(135deg,#1a1f2e,#16213e);
+                    border:2px solid {tw_color};border-radius:12px;
+                    padding:16px;text-align:center;margin:10px 0;">
+            <div style="font-size:1.8em">{tw_icon}</div>
+            <div style="color:{tw_color};font-size:1.5em;font-weight:bold;">{tw_label}</div>
+            <div style="color:#8892b0;font-size:0.88em;margin-top:8px;">
+                Score Twitter: <b style="color:#ccd6f6;font-size:1.2em">{tw_sc:.1f}/100</b> &nbsp;|&nbsp;
+                Polarité pondérée: <b style="color:#fbbf24">{tw_pol:+.4f}</b> &nbsp;|&nbsp;
+                Tweets analysés: <b style="color:#ccd6f6">{tw_total}</b> &nbsp;|&nbsp;
+                📈 <b style="color:#10b981">{tw_bull}</b> &nbsp;
+                📉 <b style="color:#ef4444">{tw_bear}</b> &nbsp;
+                ➡️ <b style="color:#3b82f6">{tw_neu}</b>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # ── Filters ──
+        tw_col1, tw_col2, tw_col3 = st.columns(3)
+        with tw_col1:
+            tw_filter_cat = st.selectbox("📂 Filtrer par catégorie",
+                ["Toutes"] + TWITTER_CATEGORIES, key="tw_cat")
+        with tw_col2:
+            tw_filter_sent = st.selectbox("🎭 Filtrer par sentiment",
+                ["Tous", "positif", "négatif", "neutre"], key="tw_sent")
+        with tw_col3:
+            tw_search = st.text_input("🔍 Rechercher", placeholder="Fed, inflation, war...", key="tw_search")
+
+        # ── Category sentiment breakdown ──
+        st.markdown('<div class="section-title">📊 Sentiment par catégorie</div>', unsafe_allow_html=True)
+        by_cat = tw_s.get("by_category", {})
+        if by_cat:
+            cat_cols = st.columns(min(len(by_cat), 4))
+            for ci, (cat_name, cat_data) in enumerate(by_cat.items()):
+                with cat_cols[ci % len(cat_cols)]:
+                    avg_pol = cat_data.get("avg_polarity", 0)
+                    cb = cat_data["bull"]; cr = cat_data["bear"]; cn = cat_data["neutral"]
+                    total_c = cb + cr + cn
+                    cat_color = "#10b981" if avg_pol > 0.02 else "#ef4444" if avg_pol < -0.02 else "#3b82f6"
+                    st.markdown(f"""
+                    <div style="background:#1a1f2e;border:1px solid {cat_color};
+                                border-radius:8px;padding:10px;text-align:center;margin:4px 0;">
+                        <div style="color:#ccd6f6;font-size:0.85em;font-weight:bold">{cat_name}</div>
+                        <div style="color:{cat_color};font-size:1.2em;font-weight:bold">{avg_pol:+.3f}</div>
+                        <div style="color:#8892b0;font-size:0.72em">
+                            📈{cb} 📉{cr} ➡️{cn} | {total_c} tweets
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+        # ── Account cards ──
+        st.markdown('<div class="section-title">👤 Comptes suivis & statut</div>', unsafe_allow_html=True)
+
+        # Filter accounts
+        filtered_tw = twitter_articles
+        if tw_filter_cat != "Toutes":
+            filtered_tw = [a for a in filtered_tw if a.get("category") == tw_filter_cat]
+        if tw_filter_sent != "Tous":
+            filtered_tw = [a for a in filtered_tw if a.get("sentiment") == tw_filter_sent]
+        if tw_search:
+            filtered_tw = [a for a in filtered_tw
+                          if tw_search.lower() in a.get("title","").lower()
+                          or tw_search.lower() in a.get("account_name","").lower()]
+
+        # Group by account
+        accounts_seen = {}
+        for art in twitter_articles:
+            handle = art.get("source", "")
+            if handle not in accounts_seen:
+                accounts_seen[handle] = {
+                    "name": art.get("account_name",""),
+                    "cat": art.get("category",""),
+                    "weight": art.get("weight", 0.8),
+                    "tweets": [],
+                    "available": art.get("type") != "twitter_unavailable",
+                }
+            if art.get("type") != "twitter_unavailable":
+                accounts_seen[handle]["tweets"].append(art)
+
+        acc_cols = st.columns(3)
+        for ai, (handle, acc_data) in enumerate(accounts_seen.items()):
+            with acc_cols[ai % 3]:
+                tweets = acc_data["tweets"]
+                available = acc_data["available"]
+                avg_pol = float(np.mean([t["polarity"] for t in tweets])) if tweets else 0.0
+                n_bull = sum(1 for t in tweets if t["sentiment"]=="positif")
+                n_bear = sum(1 for t in tweets if t["sentiment"]=="négatif")
+
+                if not available:
+                    status_color = "#4b5563"; status_icon = "⚫"; status_txt = "Non disponible"
+                elif avg_pol > 0.05:
+                    status_color = "#10b981"; status_icon = "🟢"; status_txt = "Positif"
+                elif avg_pol < -0.05:
+                    status_color = "#ef4444"; status_icon = "🔴"; status_txt = "Négatif"
+                else:
+                    status_color = "#3b82f6"; status_icon = "🔵"; status_txt = "Neutre"
+
+                st.markdown(f"""
+                <div style="background:#1a1f2e;border:1px solid {status_color};
+                            border-radius:8px;padding:10px;margin:4px 0;min-height:90px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <div>
+                            <div style="color:#ccd6f6;font-weight:bold;font-size:0.88em">
+                                {status_icon} {acc_data['name']}</div>
+                            <div style="color:#1da1f2;font-size:0.75em">{handle}</div>
+                            <div style="background:#1e3a5f;color:#93c5fd;padding:1px 6px;
+                                        border-radius:8px;font-size:0.68em;display:inline-block;margin-top:2px">
+                                {acc_data['cat']}</div>
+                        </div>
+                        <div style="text-align:right;">
+                            <div style="color:{status_color};font-size:1.1em;font-weight:bold">
+                                {avg_pol:+.3f}</div>
+                            <div style="color:#8892b0;font-size:0.7em">
+                                {len(tweets)} tweets<br>
+                                📈{n_bull} 📉{n_bear}</div>
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        # ── Tweet feed ──
+        st.markdown(f'<div class="section-title">📜 Flux tweets analysés ({len(filtered_tw)} résultats)</div>',
+                    unsafe_allow_html=True)
+
+        # Sort by absolute polarity (strongest signals first)
+        sorted_tw = sorted(
+            [a for a in filtered_tw if a.get("type") != "twitter_unavailable"],
+            key=lambda x: abs(x.get("polarity", 0)), reverse=True
+        )
+
+        for art in sorted_tw[:60]:
+            sentiment = art.get("sentiment","neutre")
+            polarity  = art.get("polarity", 0)
+            handle    = art.get("source","")
+            name      = art.get("account_name","")
+            cat       = art.get("category","")
+            title     = art.get("title","")
+            pub       = art.get("published","")
+            weight    = art.get("weight", 0.8)
+            link      = art.get("link","#")
+
+            border_color = "#10b981" if sentiment=="positif" else "#ef4444" if sentiment=="négatif" else "#3b82f6"
+            sent_icon    = "📈" if sentiment=="positif" else "📉" if sentiment=="négatif" else "➡️"
+
+            st.markdown(f"""
+            <div style="background:#1a1f2e;border-left:4px solid {border_color};
+                        border-radius:0 8px 8px 0;padding:10px 14px;margin:6px 0;">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+                    <div style="flex:1;">
+                        <div style="color:#1da1f2;font-size:0.78em;font-weight:bold;margin-bottom:3px;">
+                            {sent_icon} <a href="{link}" target="_blank"
+                               style="color:#1da1f2;text-decoration:none;">
+                               {handle}</a>
+                            <span style="color:#8892b0"> — {name}</span>
+                            <span style="background:#1e3a5f;color:#93c5fd;padding:1px 6px;
+                                         border-radius:8px;font-size:0.75em;margin-left:6px">{cat}</span>
+                        </div>
+                        <div style="color:#ccd6f6;font-size:0.88em;">{title}</div>
+                        <div style="color:#8892b0;font-size:0.72em;margin-top:4px;">
+                            🕒 {pub} &nbsp;|&nbsp;
+                            Polarité: <b style="color:{border_color}">{polarity:+.3f}</b> &nbsp;|&nbsp;
+                            Poids: <b style="color:#fbbf24">{weight}</b> &nbsp;|&nbsp;
+                            Sentiment: <b style="color:{border_color}">{sentiment.upper()}</b>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        if not sorted_tw:
+            st.info("Aucun tweet disponible. Les instances Nitter peuvent être temporairement hors ligne.")
+            st.markdown("""
+            <div style="background:#1a1f2e;border:1px solid #1e3a5f;border-radius:8px;padding:12px;margin:10px 0">
+                <div style="color:#8892b0;font-size:0.85em;">
+                <b style="color:#1da1f2">ℹ️ Note :</b> Les données Twitter sont récupérées via
+                <b>Nitter</b> (miroirs publics sans API key). Si toutes les instances sont hors ligne,
+                rafraîchissez dans quelques minutes. Les comptes suivis restent visibles ci-dessus.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # ── Source list ──
+        with st.expander("📋 Liste complète des 30 comptes suivis"):
+            rows_tw = []
+            for name, meta in TWITTER_ACCOUNTS.items():
+                rows_tw.append({
+                    "Compte": name,
+                    "Handle": f"@{meta['handle']}",
+                    "Catégorie": meta["cat"],
+                    "Poids": f"{meta['weight']:.2f}",
+                    "URL": f"https://twitter.com/{meta['handle']}",
+                })
+            st.dataframe(pd.DataFrame(rows_tw), use_container_width=True)
+
+
+        # TAB 6: CONSEILS SCALPING  ← NEW
+    # ══════════════════════════════════════════════
+    with tab6:
         st.markdown('<div class="section-title">🎯 Conseils Scalping — Niveaux d\'entrée & sortie</div>', unsafe_allow_html=True)
 
         st.warning("⚠️ Ces conseils sont générés algorithmiquement à titre éducatif. Ne constituent pas un conseil financier.")
@@ -2003,9 +3072,226 @@ def main():
                         """, unsafe_allow_html=True)
 
     # ══════════════════════════════════════════════
-    # TAB 6: SOURCES
     # ══════════════════════════════════════════════
-    with tab6:
+    # TAB 7: SIMULATION IA  (Multi-Agent + Monte Carlo)
+    # ══════════════════════════════════════════════
+    with tab7:
+        st.markdown("""
+        <div style="background:linear-gradient(135deg,#0f3460,#16213e);border:1px solid #00d4ff;
+                    border-radius:12px;padding:16px 24px;margin-bottom:16px;">
+            <div style="color:#00d4ff;font-size:1.3em;font-weight:bold;">🤖 Simulation Multi-Agents — MiroFish Inspired</div>
+            <div style="color:#8892b0;font-size:0.88em;margin-top:6px;">
+                6 agents IA analysent simultanément le marché (Macro · Technique · Sentiment · Earnings · Flow · Risk)<br>
+                Monte Carlo 500 simulations · Scénarios Bull/Base/Bear · Heatmap probabilités multi-horizons
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.warning("⚠️ Simulation éducative. Pas de conseil financier.")
+
+        # ── Controls ──
+        sim_col1, sim_col2, sim_col3 = st.columns(3)
+        with sim_col1:
+            sim_market = st.selectbox("📊 Actif à simuler", list(MARKETS.keys()), key="sim_market")
+        with sim_col2:
+            sim_tf = st.selectbox("⏱️ Horizon", list(TIMEFRAMES.keys()), key="sim_tf")
+        with sim_col3:
+            n_sims = st.selectbox("🎲 Simulations MC", [200, 500, 1000], index=1, key="n_sims")
+
+        # ── Run agents ──
+        sim_df = all_market_prices[sim_market]["df"]
+        sim_pi = all_market_prices[sim_market]["price_info"]
+
+        with st.spinner("🔄 Agents en cours d'analyse..."):
+            agents = [
+                run_agent_macro_strategist(sim_df, fund_data),
+                run_agent_technical_analyst(sim_df),
+                run_agent_sentiment_analyst(news_articles, fund_data),
+                run_agent_earnings_analyst(sim_market, sim_pi),
+                run_agent_flow_analyst(sim_df),
+                run_agent_risk_analyst(sim_df, sim_market),
+            ]
+            tf_minutes = TIMEFRAMES[sim_tf]["minutes"]
+            mc = run_monte_carlo_simulation(sim_df, agents, tf_minutes, n_sims)
+            scenarios = build_scenario_matrix(agents, mc)
+
+        # ── Agent consensus banner ──
+        if mc:
+            ws = mc["weighted_score"]
+            bull_p = mc["bull_prob"]
+            if ws >= 60:   cons_color="#10b981"; cons_label="CONSENSUS HAUSSIER"; cons_icon="📈"
+            elif ws <= 40: cons_color="#ef4444"; cons_label="CONSENSUS BAISSIER"; cons_icon="📉"
+            else:          cons_color="#3b82f6"; cons_label="CONSENSUS NEUTRE";   cons_icon="➡️"
+
+            st.markdown(f"""
+            <div style="background:linear-gradient(135deg,#1a1f2e,#16213e);
+                        border:2px solid {cons_color};border-radius:12px;
+                        padding:18px;text-align:center;margin:12px 0;">
+                <div style="font-size:2em">{cons_icon}</div>
+                <div style="color:{cons_color};font-size:1.7em;font-weight:bold;">{cons_label}</div>
+                <div style="color:#8892b0;margin-top:8px;font-size:0.9em;">
+                    Score agrégé: <b style="color:#ccd6f6;font-size:1.2em">{ws:.1f}/100</b> &nbsp;|&nbsp;
+                    Hausse MC: <b style="color:#10b981">{bull_p}%</b> &nbsp;|&nbsp;
+                    Baisse MC: <b style="color:#ef4444">{mc["bear_prob"]}%</b> &nbsp;|&nbsp;
+                    Retour attendu: <b style="color:#fbbf24">{mc["expected_return"]:+.3f}%</b> &nbsp;|&nbsp;
+                    Vol: <b style="color:#a78bfa">{mc["vol_outcome"]:.3f}%</b>
+                </div>
+                <div style="color:#8892b0;font-size:0.8em;margin-top:6px;">
+                    {n_sims} simulations · Prix actuel: {mc["current_price"]:,.4f} · Médiane: {mc["p50"]:,.4f} · Drift/bar: {mc["drift_per_bar"]:+.4f}%
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # ── Agent cards ──
+        st.markdown('<div class="section-title">🧠 Résultats par agent</div>', unsafe_allow_html=True)
+        agent_cols = st.columns(3)
+        for i, agent in enumerate(agents):
+            with agent_cols[i % 3]:
+                sc  = agent["score"]
+                bias = agent["bias"]
+                conf = agent["confidence"]
+                if bias == "BULL":   bc="#10b981"; bg="rgba(16,185,129,0.1)"; bi="📈"
+                elif bias == "BEAR": bc="#ef4444"; bg="rgba(239,68,68,0.1)";  bi="📉"
+                else:                bc="#3b82f6"; bg="rgba(59,130,246,0.1)"; bi="➡️"
+
+                # Top 3 signals
+                sigs_html = ""
+                for sig_txt, sig_val, sig_col in agent.get("signals", [])[:3]:
+                    sigs_html += f'<div style="color:{sig_col};font-size:0.72em;margin:2px 0;">• {sig_txt[:55]} <b>({sig_val})</b></div>'
+
+                st.markdown(f"""
+                <div style="background:{bg};border:1px solid {bc};border-radius:10px;
+                            padding:12px;margin:5px 0;min-height:160px;">
+                    <div style="color:{bc};font-weight:bold;font-size:0.95em">{agent["name"]}</div>
+                    <div style="display:flex;align-items:center;margin:8px 0;">
+                        <div style="font-size:1.8em;margin-right:8px">{bi}</div>
+                        <div>
+                            <div style="color:#ccd6f6;font-size:1.4em;font-weight:bold">{sc:.0f}/100</div>
+                            <div style="color:{bc};font-size:0.8em">{bias} · conf {conf:.0f}%</div>
+                        </div>
+                    </div>
+                    {sigs_html}
+                </div>
+                """, unsafe_allow_html=True)
+
+        # ── Charts row 1: Radar + MC paths ──
+        st.markdown('<div class="section-title">📊 Visualisations</div>', unsafe_allow_html=True)
+        c1, c2 = st.columns([1, 1.6])
+        with c1:
+            if agents:
+                st.plotly_chart(make_agent_radar(agents, sim_market), use_container_width=True,
+                                config={"displayModeBar": False})
+        with c2:
+            if mc:
+                st.plotly_chart(make_monte_carlo_chart(mc, sim_market), use_container_width=True,
+                                config={"displayModeBar": False})
+
+        # ── Charts row 2: Distribution + Scenarios ──
+        c3, c4 = st.columns([1, 1.2])
+        with c3:
+            if mc:
+                st.plotly_chart(make_probability_distribution(mc, sim_market),
+                                use_container_width=True, config={"displayModeBar": False})
+        with c4:
+            if scenarios:
+                st.plotly_chart(make_scenario_chart(scenarios, mc),
+                                use_container_width=True, config={"displayModeBar": False})
+
+        # ── Scenario detail cards ──
+        if scenarios:
+            st.markdown('<div class="section-title">🎯 Détail des scénarios</div>', unsafe_allow_html=True)
+            sc_cols = st.columns(3)
+            for i, sc_item in enumerate(scenarios):
+                with sc_cols[i]:
+                    ret = sc_item["expected_return"]
+                    st.markdown(f"""
+                    <div style="background:linear-gradient(135deg,#1a1f2e,#16213e);
+                                border:2px solid {sc_item['color']};border-radius:12px;
+                                padding:16px;text-align:center;">
+                        <div style="font-size:1.6em">{sc_item['icon']}</div>
+                        <div style="color:{sc_item['color']};font-size:1.1em;font-weight:bold;margin:4px 0">
+                            {sc_item['name']}
+                        </div>
+                        <div style="color:#8892b0;font-size:0.8em">Score agrégé</div>
+                        <div style="color:#ccd6f6;font-size:1.5em;font-weight:bold">{sc_item['score']}/100</div>
+                        <div style="color:#8892b0;font-size:0.8em;margin-top:8px">Prix cible</div>
+                        <div style="color:{sc_item['color']};font-size:1.3em;font-weight:bold">
+                            {sc_item['target_price']:,.4f}
+                        </div>
+                        <div style="color:#fbbf24;font-size:0.9em">{ret:+.3f}%</div>
+                        <div style="background:rgba(255,255,255,0.05);border-radius:8px;
+                                    padding:6px;margin-top:8px;">
+                            <div style="color:#8892b0;font-size:0.75em">Probabilité</div>
+                            <div style="color:{sc_item['color']};font-size:1.4em;font-weight:bold">
+                                {sc_item['probability']}%
+                            </div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+        # ── Heatmap all markets ──
+        st.markdown('<div class="section-title">🌡️ Heatmap probabilités — Tous actifs × Tous horizons</div>', unsafe_allow_html=True)
+        st.plotly_chart(make_probability_heatmap(all_predictions, MARKETS),
+                        use_container_width=True, config={"displayModeBar": False})
+
+        # ── Full probability table ──
+        st.markdown('<div class="section-title">📋 Tableau complet des probabilités</div>', unsafe_allow_html=True)
+        prob_rows = []
+        for mn in MARKETS:
+            preds_mn = all_predictions.get(mn, {})
+            pi_mn    = all_market_prices[mn]["price_info"]
+            price_mn = pi_mn.get("price", 0)
+            chg_mn   = pi_mn.get("change_pct", 0)
+            row = {
+                "Actif": f"{MARKETS[mn]['icon']} {mn}",
+                "Prix": f"{price_mn:,.3f}" if price_mn else "—",
+                "Var%": f"{chg_mn:+.2f}%",
+            }
+            for tf in ["5 min","15 min","60 min","240 min"]:
+                p = preds_mn.get(tf, {})
+                b  = p.get("bull_prob", 50)
+                be = p.get("bear_prob", 50)
+                d  = p.get("direction","—")
+                cf = p.get("confidence",0)
+                icon = "📈" if d=="HAUSSIER" else "📉" if d=="BAISSIER" else "➡️"
+                row[tf] = f"{icon} {b}%↑ {be}%↓ (cf:{cf:.0f}%)"
+            # Run quick MC for this market
+            df_mn = all_market_prices[mn]["df"]
+            if not df_mn.empty and len(df_mn) >= 10:
+                agents_mn = [
+                    run_agent_macro_strategist(df_mn, fund_data),
+                    run_agent_technical_analyst(df_mn),
+                    run_agent_sentiment_analyst(news_articles, fund_data),
+                ]
+                mc_mn = run_monte_carlo_simulation(df_mn, agents_mn, 60, 200)
+                if mc_mn:
+                    row["MC Score"] = f"{mc_mn['weighted_score']:.0f}/100"
+                    row["MC Bull%"] = f"{mc_mn['bull_prob']}%"
+                    row["Retour exp."] = f"{mc_mn['expected_return']:+.3f}%"
+                else:
+                    row["MC Score"] = "—"; row["MC Bull%"] = "—"; row["Retour exp."] = "—"
+            else:
+                row["MC Score"] = "—"; row["MC Bull%"] = "—"; row["Retour exp."] = "—"
+            prob_rows.append(row)
+
+        st.dataframe(pd.DataFrame(prob_rows).set_index("Actif"), use_container_width=True)
+
+        st.markdown("""
+        <div style="background:#1a1f2e;border:1px solid #1e3a5f;border-radius:8px;padding:12px;margin-top:10px;">
+            <div style="color:#8892b0;font-size:0.8em;">
+            <b style="color:#00d4ff">Méthodologie :</b>
+            6 agents IA (Macro Strategist · Technical Analyst · Sentiment Analyst · Earnings Analyst · Flow Analyst · Risk Analyst)
+            analysent indépendamment le marché. Leurs scores sont pondérés (Tech 35% · Macro 20% · Earnings 15% · Sentiment 15% · Flow 10% · Risk 5%)
+            pour produire un consensus. Le Monte Carlo simule N chemins de prix à partir de la volatilité historique et du drift calculé.
+            Les scénarios Bull/Base/Bear ajustent ce consensus de ±15 points.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    
+        # TAB 8: SOURCES
+    # ══════════════════════════════════════════════
+    with tab8:
         st.markdown('<div class="section-title">📋 Sources & Méthodologie</div>', unsafe_allow_html=True)
         col_s1, col_s2 = st.columns(2)
         with col_s1:
@@ -2039,6 +3325,13 @@ def main():
             icon = "🟢" if data["impact"] == "positif" else "🔴" if data["impact"] in ("négatif","negatif") else "⚪"
             trend_disp = data['trend']
             st.markdown(f"- {icon} **{name}** — `{data['value']}` {trend_disp} — *{data['impact']}* (poids: {data['weight']*100:.0f}%)")
+        st.markdown("#### 🐦 Comptes Twitter/X suivis (30 comptes)")
+        tw_cats_grp = {}
+        for name, meta in TWITTER_ACCOUNTS.items():
+            c = meta["cat"]
+            tw_cats_grp.setdefault(c, []).append(f"@{meta['handle']} ({name})")
+        for cat, handles in sorted(tw_cats_grp.items()):
+            st.markdown(f"**{cat}**: " + " · ".join(handles))
         st.warning("⚠️ **Avertissement légal** : Application éducative uniquement. Pas de conseil financier.")
 
     # ── PDF Report ──
