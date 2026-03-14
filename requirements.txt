@@ -10,3 +10,4 @@ textblob
 scikit-learn
 fpdf2
 pytz
+vaderSentiment
