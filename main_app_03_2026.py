@@ -4096,7 +4096,7 @@ def main():
                 key="mf_custom"
             )
 
-        if mf_run or st.session_state.get("mf_result"):
+        if mf_run or st.session_state.get("mf_result_data"):
 
             mf_df         = all_market_prices[mf_asset]["df"]
             mf_tf_minutes = TIMEFRAMES[mf_tf]["minutes"]
@@ -4142,13 +4142,13 @@ def main():
                     timeframe_minutes=mf_tf_minutes,
                     n_simulations=mf_sims,
                 )
-                st.session_state["mf_result"] = mf_result
-                st.session_state["mf_asset_name"] = mf_asset
-                st.session_state["mf_tf"] = mf_tf
+                st.session_state["mf_result_data"] = mf_result
+                st.session_state["mf_result_asset"] = mf_asset
+                st.session_state["mf_result_tf"] = mf_tf
 
-            mf_result = st.session_state.get("mf_result", {})
-            mf_asset_name = st.session_state.get("mf_asset_name", mf_asset)
-            mf_tf_display = st.session_state.get("mf_tf", mf_tf)
+            mf_result = st.session_state.get("mf_result_data", {})
+            mf_asset_name = st.session_state.get("mf_result_asset", mf_asset)
+            mf_tf_display = st.session_state.get("mf_result_tf", mf_tf)
 
             if not mf_result:
                 st.error("Données insuffisantes pour lancer la simulation.")
